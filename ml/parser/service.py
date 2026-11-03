@@ -1,6 +1,7 @@
 """GLiNER2 extraction service for the search parser (cold path).
 
-    ml/.venv/bin/python ml/parser/service.py 7100 [fastino/gliner2-base-v1]
+    ml/.venv/bin/python ml/parser/service.py 7100 [fastino/gliner2-base-v1] [host]
+    (host defaults to 127.0.0.1; the Docker image passes 0.0.0.0 and publishes the port on the server's localhost only)
 
 GET /health -> {"ok": true, "model": ...}
 POST /extract {"text": ...} -> {"model": ..., "result": {"entities": {...}, "equipment": {"label", "confidence"}}}
@@ -14,6 +15,7 @@ from gliner2 import GLiNER2
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 7100
 MODEL = sys.argv[2] if len(sys.argv) > 2 else "fastino/gliner2-base-v1"
+HOST = sys.argv[3] if len(sys.argv) > 3 else "127.0.0.1"
 model = GLiNER2.from_pretrained(MODEL)
 schema = (
     model.create_schema()
@@ -50,5 +52,5 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-print(f"gliner2 service ready on :{PORT} ({MODEL})", flush=True)
-HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+print(f"gliner2 service ready on {HOST}:{PORT} ({MODEL})", flush=True)
+HTTPServer((HOST, PORT), Handler).serve_forever()
