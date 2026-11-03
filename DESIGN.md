@@ -253,9 +253,9 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 - [ ] Scheduler + pollers, normalizer, exact dedup, matcher, queue, notifier (with a Telegram simulator that enforces the real limits)
 - [ ] Tracing on every stage (as measured: lite metrics, own 1% sampling, 1 span per posting)
 
-**Day 2: measure and explain**
-- [ ] Same-load classifier trained on generator pairs
-- [ ] Search parser (rules + LLM fallback) with call log and eval set
+**Day 2: AI/ML and measurement** (focus: AI/ML + backend/infra)
+- [ ] Same-load classifier trained on generator pairs: precision/recall, threshold choice, measured effect on misses and duplicates
+- [ ] Search parser (rules + LLM fallback): structured output, eval set (incl. messy phrasings from a local model), regression tests, LLM call log
 - [ ] Dashboard, scorer, load test runs
 - [ ] `SCALING.md`: section 5 rewritten with measured numbers
 - [x] README (plain-language guide)

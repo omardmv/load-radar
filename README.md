@@ -29,6 +29,14 @@ This is an interview project for Numeo, which builds AI agents for trucking. The
 | Customer-obsessed | Everything is judged by what the dispatcher feels: speed, nothing missed, no duplicates, account safe |
 | Architecture over code | Every decision below comes with the alternative and the trade-off |
 
+### Focus
+
+The project goes deep on two areas: **backend/infrastructure** (scaling, measurement, observability) and **AI/ML**, where the system genuinely needs it:
+- **ML: same-load classifier** for dedup. The simple rule wrongly merged 12% of loads; the classifier is trained on the generator's answer key, and its effect on misses and duplicates is measured end to end.
+- **LLM: search parser.** Rules first, an LLM fallback with structured output, an eval set, regression tests, guardrails, and full LLM call logging (prompt, model, tokens, latency, cost).
+
+No frontend: the user-facing side is shown through the simulators, the scorer and the dashboards.
+
 ## 3. The solution in one picture
 
 ```
