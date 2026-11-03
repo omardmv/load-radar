@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createSimClock, type Clock } from './shared/clock.ts';
 import { createBoundedQueue } from './shared/queue.ts';
+import { createExpiringSet } from './shared/expiring.ts';
 import type { Alert, Load, PlanEntry, RawPosting } from './shared/types.ts';
 import { loadUsers } from './data/users.ts';
 import { loadGazetteer } from './normalize/gazetteer.ts';
@@ -35,6 +36,9 @@ export async function startEngine(cfg: EngineConfig) {
   const heat = createHeat(clock);
   const alertQueue = createAlertQueue({ clock, freshAfterMs: 10_000, deadlineMs: 10 * 60_000, ttlMs: 72 * 3_600_000 });
   const counts = { polls: 0, postings: 0, newLoads: 0, alertsQueued: 0, alertsSent: 0 };
+  // Entitlement (LLD 6.6): each customer fetches the same posting with their own login. Dedup decides which real
+  // load it is; matching must still run once per (who may see it, load), or only the first customer is alerted.
+  const matchedFor = createExpiringSet(72 * 3_600_000, 3_600_000, clock);
 
   const pollQueue = createBoundedQueue<PlanEntry>(20_000);
   const rawQueue = createBoundedQueue<RawPosting>(100_000);
@@ -65,8 +69,10 @@ export async function startEngine(cfg: EngineConfig) {
     const load = n.load;
     const d = obs.stage('dedup', t, () => dedup(load));
     obs.dedup(d.result);
-    if (d.result === 'refresh' || d.result === 'updated') { obs.finish(t, { board: load.board, dedup: d.result }); return; }
     if (d.result === 'new') { counts.newLoads++; heat.record(load.origin.cell4.slice(0, 3), load.equipment); }
+    const visKey = `${load.visibleTo.kind === 'all' ? '*' : load.visibleTo.userId}|${load.canonicalId}`;
+    if (matchedFor.has(visKey)) { obs.finish(t, { board: load.board, dedup: d.result }); return; }   // this customer already matched this load
+    matchedFor.add(visKey);
     const m = obs.stage('match', t, () => matcher.match(load));
     obs.fanout(m.candidates);
     let offered = 0;
