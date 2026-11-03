@@ -2,3 +2,4 @@ out/
 out-small/
 node_modules/
 ml/.venv/
+.env

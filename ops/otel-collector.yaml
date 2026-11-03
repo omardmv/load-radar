@@ -1,18 +1,56 @@
+# One OTLP input, two trace pipelines:
+#   traces        everything            -> Jaeger
+#   traces/genai  only LLM/model calls  -> Langfuse (prompt, output, tokens) + span metrics for Prometheus
 receivers:
   otlp:
     protocols:
       http:
         endpoint: 0.0.0.0:4318
+
 processors:
   batch: {}
+  # Keep only GenAI spans (OpenTelemetry GenAI conventions): drop anything without a model attribute.
+  filter/genai:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["gen_ai.request.model"] == nil'
+
+connectors:
+  # Turns GenAI spans into Prometheus metrics: calls and latency per model, no app code needed.
+  spanmetrics:
+    namespace: llm
+    dimensions:
+      - name: gen_ai.system
+      - name: gen_ai.request.model
+      - name: gen_ai.operation.name
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s]
+
 exporters:
-  otlp:
+  otlp_grpc/jaeger:
     endpoint: jaeger:4317
     tls:
       insecure: true
+  otlphttp/langfuse:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      Authorization: "Basic ${env:LANGFUSE_OTEL_AUTH}"
+      x-langfuse-ingestion-version: "4"
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp]
+      exporters: [otlp_grpc/jaeger]
+    traces/genai:
+      receivers: [otlp]
+      processors: [filter/genai, batch]
+      exporters: [otlphttp/langfuse, spanmetrics]
+    metrics/llm:
+      receivers: [spanmetrics]
+      exporters: [prometheus]
