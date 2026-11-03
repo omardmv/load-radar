@@ -30,6 +30,7 @@ ssh dev 'cd ~/load-radar && git log --oneline -1'           # what is deployed
 ```bash
 ssh dev 'git clone https://github.com/omardmv/load-radar.git ~/load-radar'
 scp .env dev:~/load-radar/ && ssh dev chmod 600 ~/load-radar/.env
+ssh dev 'docker volume create gliner2-cache'                 # external volume for the GLiNER2 model download
 ssh dev 'cd ~/load-radar && docker compose up -d --build \
   && docker compose exec -T ollama ollama pull qwen2.5:1.5b-instruct-q8_0 \
   && docker compose run --rm -T app npm ci --omit=dev'
