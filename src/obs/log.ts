@@ -13,7 +13,7 @@ export type Log = (level: Level, event: string, attrs?: Attrs) => void;
 
 export function setupLogs(opts: { endpoint: string | null; serviceName: string }): { log: Log; shutdown(): Promise<void> } {
   const provider = opts.endpoint ? new LoggerProvider({ resource: resourceFromAttributes({ 'service.name': opts.serviceName }),
-    processors: [new BatchLogRecordProcessor(new OTLPLogExporter({ url: opts.endpoint }), { scheduledDelayMillis: 1_000 })] }) : null;
+    processors: [new BatchLogRecordProcessor({ exporter: new OTLPLogExporter({ url: opts.endpoint }), scheduledDelayMillis: 1_000 })] })   // this SDK version takes one options object : null;
   const logger = provider?.getLogger('load-radar');
   const log: Log = (level, event, attrs = {}) => {
     const span = trace.getSpan(context.active())?.spanContext();
