@@ -5,7 +5,7 @@ One Linux server ("dev": Ubuntu 24.04, Ryzen 7 3700U 4C/8T, 14 GB RAM, no GPU) r
 ```
 Mac                                   Server (Docker Compose, ~/load-radar)
  browser ──► localhost:3000..16686 ─SSH─► 127.0.0.1:<port> ─► grafana, langfuse-web, prometheus, jaeger, minio
- code    ──► rsync ──────────────────────► ~/load-radar ─► app (node:26, on demand): engine, simulators, eval
+ code    ──► git push ─► GitHub ─► git pull ► ~/load-radar ─► app (node:26, on demand): engine, simulators, eval
                                                           ├─► gliner2 :7100   (GLiNER2, CPU)
                                                           ├─► ollama  :11434  (Qwen 2.5 1.5B, CPU)
                                                           └─► otel-collector :4318 ─► jaeger / langfuse / prometheus
@@ -15,21 +15,27 @@ Every port is published on the server's 127.0.0.1 only, so nothing is open on th
 
 ## Ship a change
 
+The server's `~/load-radar` is a clone of https://github.com/omardmv/load-radar (public, so no key is needed to pull).
+
 ```bash
-rsync -az --delete --exclude node_modules --exclude 'out*' --exclude .git --exclude ml/.venv \
-  --exclude ml/dedup/data --exclude .env ./ dev:~/load-radar/
-ssh dev 'cd ~/load-radar && docker compose up -d --build'
+git push                                                    # on the Mac
+ssh dev 'cd ~/load-radar && git pull --ff-only && docker compose up -d --build'
+ssh dev 'cd ~/load-radar && git log --oneline -1'           # what is deployed
 ```
 
-`.env` is copied once by hand (`scp .env dev:~/load-radar/ && ssh dev chmod 600 ~/load-radar/.env`), never by rsync.
+`.env` is gitignored and copied once by hand (`scp .env dev:~/load-radar/ && ssh dev chmod 600 ~/load-radar/.env`). Generated data (`out*/`) stays on the server.
 
 ## First setup on a new server
 
 ```bash
+ssh dev 'git clone https://github.com/omardmv/load-radar.git ~/load-radar'
+scp .env dev:~/load-radar/ && ssh dev chmod 600 ~/load-radar/.env
 ssh dev 'cd ~/load-radar && docker compose up -d --build \
   && docker compose exec -T ollama ollama pull qwen2.5:1.5b-instruct-q8_0 \
   && docker compose run --rm -T app npm ci --omit=dev'
 ```
+
+If the repo goes private, add a read-only deploy key: `ssh-keygen -t ed25519 -f ~/.ssh/load_radar_deploy` on the server, then `gh repo deploy-key add` with the `.pub` file, and clone over SSH.
 
 ## Tunnel from the Mac
 
