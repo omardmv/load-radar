@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+> **Owner decision (2026-11-04): no automated tests.** Skip every step that writes or runs a `*.test.ts` file. Check each task instead with the commands it already lists for real data: the CLI, the training script output, `ml/dedup/compare.ts`, `ml/parser/eval.ts`, and scored runs with `node scripts/run.ts`.
+
 - Same rules as Day 1: every relative import ends in `.ts`; type-only imports use `import type`; no enums, namespaces or parameter properties.
 - Training/serving parity: features come only from `pairFeatures()` in `src/dedup/features.ts`. Python never computes features.
 - Splits are **by time** (first 60% of pairs train, next 20% pick the threshold, last 20% test). Never random: random splits leak the future.

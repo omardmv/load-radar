@@ -149,17 +149,15 @@ Rough stages. The load tests replace these guesses with measurements.
 | Data generator + realism checks | ✅ Built and validated |
 | Engine core (normalize, dedup, match, alert) | ✅ Built for the benchmark (`bench/overhead/core.ts`); dedup uses a simple rule, not the trained model yet |
 | Observability overhead test | ✅ Done: +1.0% with our setup |
-| Board and Telegram simulators, scheduler, pollers, full engine, scorer, end-to-end run | ✅ Built (Day 1), 43 tests; first scored run above |
+| Board and Telegram simulators, scheduler, pollers, full engine, scorer, end-to-end run | ✅ Built (Day 1); first scored run above. No automated tests by choice: checked by scored runs (LLD §15) |
 | Trained dedup classifier, LLM search parser, dashboards, load tests | ⏳ Day 2 |
 
 ## Run it
 
 ```bash
 npm install
-npm test                 # unit tests
 npm run gen:small        # 8,000 loads, 300 users, 2 hours -> out-small/
 node scripts/run.ts --data out-small --speed 30 --minutes 3
-npm run test:e2e         # generates its own data, ~2 minutes
 ```
 
 The last line printed is `RUN_RESULT {...}`: alerts expected vs delivered, misses, duplicates, latency (simulated seconds), board stats (429s, bans) and engine counters. The same JSON is written to `out-small/run/result.json`.

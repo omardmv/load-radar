@@ -479,18 +479,20 @@ Add something only when a measurement shows the need:
 - Every query and alert is scoped by `userId`; entitlement is enforced in the matcher, not the UI.
 - Audit log of every credential use (credential id, board, time, status). This is also the evidence if a board ever questions an account's traffic.
 
-## 15. Testing
+## 15. Verification (no automated test suite)
 
-| Level | What | How |
-| --- | --- | --- |
-| Unit | Board adapters, place lookup (truncation, aliases), equipment mapping, rate and weight parsing | Fixtures sampled from `postings.ndjson` |
-| Unit | Budget allocation: frequencies sum to the budget, clamps hold | Property test over random heats |
-| Property | Dedup **never** merges siblings (different pickup days) | Generated sibling pairs |
-| Model | Classifier precision and recall on held-out generator pairs | Report plus threshold choice |
-| Eval | Parser field accuracy, rules vs LLM | 50-example set |
-| Integration | End to end on 1K loads at 50× speed | Scorer: zero misses on the happy path |
-| Recovery | Kill the engine mid-run, restart from snapshot | Scorer: missed and duplicate alerts caused by the restart |
-| Load | The runs in DESIGN.md, plus an undersized-pool run (64 sockets) for a before/after | Dashboard screenshots + scorer report → `SCALING.md` |
+Decision (2026-11-04): the project keeps **no automated unit or integration tests**. Correctness is checked by measuring the running system instead:
+
+| What | How |
+| --- | --- |
+| End to end: misses, duplicates, latency, bans | `node scripts/run.ts` + the scorer against the answer key (`RUN_RESULT`) |
+| Realism of the generated data | `node sim/validate.ts` against real reference numbers |
+| Dedup classifier quality | held-out precision/recall in `ml/dedup/RESULTS.md`, plus a rule-vs-model end-to-end run |
+| Search parser quality | the labeled eval set and `ml/parser/RESULTS.md` |
+| Observability cost | `bench/overhead/` on a pinned Linux core |
+| Scaling | the load-test runs in DESIGN.md → `SCALING.md` |
+
+Trade-off: a regression is noticed when a scored run or an eval gets worse, not at the moment the code changes. The scorer is what caught the Day 1 entitlement bug (misses 68% → 3.6% after the fix).
 
 **Scorer:** for each `(user, load)` that the answer key says should alert, given the user's searches, the load's true attributes and the user's credentials, it finds the first delivery. It reports latency (delivery time minus true first posting), misses, duplicates and stale alerts. Expected matches use the same filters as the matcher, in a plain cell-indexed implementation that's easy to check by hand. It avoids comparing every load with every search (2 billion pairs at 100K × 20K).
 

@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+> **Owner decision (2026-11-04): no automated tests.** Skip every step that writes or runs a `*.test.ts` file. Check each task instead with the commands it already lists for real data: the CLI, the training script output, `ml/dedup/compare.ts`, `ml/parser/eval.ts`, and scored runs with `node scripts/run.ts`.
+
 - Same TypeScript rules as Day 1: `.ts` import extensions, `import type` for types, no enums/namespaces/parameter properties.
 - Extractors return spans only; **all** interpretation (places, states, regions, numbers, defaults, questions) lives in `src/parse/normalize.ts`, so every extractor is judged on equal terms.
 - Never guess silently: missing equipment, unknown or ambiguous places, and direction words ("north") produce a question.
