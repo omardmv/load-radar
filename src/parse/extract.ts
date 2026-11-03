@@ -16,6 +16,8 @@ export const RATE_PATTERNS: RegExp[] = [
   /\$?(\d+\.\d{1,2})\s*\+/,
   /\$(\d+\.\d{1,2})\b/,
   /\b(\d+\.\d{1,2})\s*min(?:imum)?\b/i,
+  /\b(?:nothing|not|no(?:thing)? less than|never)\s*(?:under|below|less than)?\s*\$?(\d+(?:\.\d+)?)/i,   // "nothing under 2.80"
+  /(?<![\d.])(\d\.\d{2})(?![\d.])/,              // last resort: a bare price like 2.80 in a search is a per-mile rate
 ];
 export const DH_PATTERNS: RegExp[] = [
   /\bdh\s*(\d{1,3})\b/i,
@@ -25,8 +27,8 @@ export const DH_PATTERNS: RegExp[] = [
   /\bdeadhead\s*(?:of|under|max|up to)?\s*(\d{1,3})\b/i,
 ];
 const DEST_SEP = /(?:\s*(?:->|→)\s*|\b(?:heading|headed|going)(?:\s+to)?\s+|\bto\s+)/i;
-const DEST_STOP = /\s*(?:\(|,(?!\s*[A-Za-z]{2}\b)|\s(?:van|reefer|flatbed|dry|paying|pay|min|minimum|under|over|dh|rpm|want|need|only)\b|\s?\$|\s\d)/i;
-const ORIGIN_PREP = /\b(?:out of|outta|from|empty in|in|near)\s+([a-z][a-z .'-]*?(?:,?\s+[a-z]{2})?)(?=\s*(?:,|$|-|\b(?:going|to|headed|heading|tmrw|tomorrow|today|tonight|want|need|paying|pay|dh|rpm|any|anywhere|van|reefer|flatbed)\b|\d|\$))/i;
+const DEST_STOP = /\s*(?:\(|,(?!\s*[A-Za-z]{2}\b)|\s(?:van|reefer|flatbed|dry|paying|pay|min|minimum|under|over|dh|rpm|want|need|only|nothing|not|no|never|at least)\b|\s?\$|\s\d)/i;
+const ORIGIN_PREP = /\b(?:out of|outta|from|empty in|in|near)\s+([a-z][a-z .'-]*?(?:,?\s+[a-z]{2})?)(?=\s*(?:,|$|-|\b(?:going|to|headed|heading|tmrw|tomorrow|today|tonight|want|need|paying|pay|dh|rpm|any|anywhere|van|reefer|flatbed|min|minimum|at least|nothing|not|no|never|over|above)\b|\d|\$))/i;
 const NOISE = /\b(?:need|needs|looking|for|loads?|got|have|a|an|the|empty|only|truck|available|anything|any direction|anywhere)\b|\d+\s*ft\b|[,–-]/gi;
 
 const firstMatch = (patterns: RegExp[], s: string) => { for (const re of patterns) { const m = re.exec(s); if (m) return m; } return null; };
