@@ -248,10 +248,10 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 **Day 1: the pipeline runs end to end**
 - [x] Data generator + validation
 - [x] Engine core for the benchmark (normalize, dedup with a simple rule, matcher, alerts) + observability overhead test
-- [ ] `docker compose`: OTel Collector, Prometheus, Grafana, Jaeger (observability only; no Redis)
-- [ ] Board simulator
-- [ ] Scheduler + pollers, normalizer, exact dedup, matcher, queue, notifier (with a Telegram simulator that enforces the real limits)
-- [ ] Tracing on every stage (as measured: lite metrics, own 1% sampling, 1 span per posting)
+- [x] `docker compose`: OTel Collector, Prometheus, Grafana, Jaeger (observability only; no Redis); stack not yet started on this machine
+- [x] Board simulator (budgets, 429s, bans, covered loads) and Telegram simulator
+- [x] Scheduler + pollers, normalizer, dedup (rule; classifier on Day 2), matcher, alert queue, notifier
+- [x] Observability on every stage (lite metrics, own 1% sampling, 1 span per posting) and an end-to-end scored run (README "First end-to-end result")
 
 **Day 2: AI/ML and measurement** (focus: AI/ML + backend/infra)
 - [ ] Same-load classifier trained on generator pairs: precision/recall, threshold choice, measured effect on misses and duplicates

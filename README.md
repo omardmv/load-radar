@@ -149,7 +149,38 @@ Rough stages. The load tests replace these guesses with measurements.
 | Data generator + realism checks | ✅ Built and validated |
 | Engine core (normalize, dedup, match, alert) | ✅ Built for the benchmark (`bench/overhead/core.ts`); dedup uses a simple rule, not the trained model yet |
 | Observability overhead test | ✅ Done: +1.0% with our setup |
-| Board simulator, scheduler, pollers, notifier, dashboards, scorer, full load tests | ⏳ Designed, not built |
+| Board and Telegram simulators, scheduler, pollers, full engine, scorer, end-to-end run | ✅ Built (Day 1), 43 tests; first scored run above |
+| Trained dedup classifier, LLM search parser, dashboards, load tests | ⏳ Day 2 |
+
+## Run it
+
+```bash
+npm install
+npm test                 # unit tests
+npm run gen:small        # 8,000 loads, 300 users, 2 hours -> out-small/
+node scripts/run.ts --data out-small --speed 30 --minutes 3
+npm run test:e2e         # generates its own data, ~2 minutes
+```
+
+The last line printed is `RUN_RESULT {...}`: alerts expected vs delivered, misses, duplicates, latency (simulated seconds), board stats (429s, bans) and engine counters. The same JSON is written to `out-small/run/result.json`.
+
+With observability: `npm run obs:up`, then add `--otlp http://127.0.0.1:4318/v1/traces` to the run. Prometheus is on :9090, Grafana on :3000, Jaeger on :16686. The engine serves metrics on :9464.
+
+### First end-to-end result
+
+Small dataset (3,000 loads, 100 customers, 172 logins), 90 simulated minutes at 60× speed, scored against the answer key:
+
+| | First run | After the fix |
+| --- | --- | --- |
+| Alerts delivered / expected | 753 / 2,353 | 2,268 / 2,353 |
+| Missed | 68% | 3.6% |
+| Post-to-alert p50 / p95 / p99 | 2 s / 438 s / 1,343 s | 3 s / 62 s / 277 s |
+| Duplicate alerts | 0.7% | 2.2% |
+| Board requests / 429s / bans | 495K / 0 / 0 | 495K / 0 / 0 |
+
+**The bug the first run found:** each customer fetches the same posting with their own login. Dedup treated the second customer's copy as a refresh and stopped, so only the first customer to fetch a load was ever alerted. Matching now runs once per (customer, load).
+
+**Open issues for Day 2:** duplicates (2.2%, target < 1%: dedup misses some cross-posts, which the classifier should fix); 258 alerts the scorer didn't expect (likely the scorer and engine reading slightly different values: board mileage, repost rates and dates); the p99 tail from quiet lanes polled every few minutes.
 
 ## 9. Where to read more
 

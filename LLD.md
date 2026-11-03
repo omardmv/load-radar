@@ -231,7 +231,7 @@ loop:
 | Response | Action |
 | --- | --- |
 | `200` | `consecutive429 = 0` |
-| `429` | `consecutive429++`, `pausedUntil = now + min(Retry-After, 2^n × 5 s, 15 min)` with jitter |
+| `429` | `consecutive429++`, `pausedUntil = now + min(15 min, max(Retry-After, 2^n × 5 s))` with jitter. Waiting less than the board's Retry-After only earns more 429s |
 | 3 × `429` within 10 minutes | **circuit open**: pause this credential for 15 min, halve its budget for an hour, increment `login_paused_total` |
 | `403 account_suspended` | `status = banned`, stop every entry for it, notify the user, increment `login_banned_total` (SLO: always 0) |
 
@@ -292,7 +292,7 @@ The generator's reposts with a **new** id, cross-posts, and co-broker copies all
 - **Threshold:** a false merge hides a real load (a missed alert); a false split sends a duplicate. A miss costs the customer more, so the threshold targets merge precision ≥ 99.5% on held-out data, accepting some duplicates. The scorer measures both.
 - **Result:** match means joining the candidate's `canonicalId`; no match means a new canonical load added to the block. Either way, emit to the new-load queue.
 
-**Visibility is not merged.** Two users who each find the same load through their own logins share one canonical load, but each arrival carries its own `visibleTo`, so each user can be alerted once. A shared-feed copy makes the canonical load visible to all.
+**Visibility is not merged.** (Implemented as a set of `(customer, load)` pairs already matched; the first end-to-end run showed that skipping refreshes per posting alerted only the first customer to fetch a load.) Two users who each find the same load through their own logins share one canonical load, but each arrival carries its own `visibleTo`, so each user can be alerted once. A shared-feed copy makes the canonical load visible to all.
 
 Partition key: `hash(pickupDate, oCell, equip)`, so all candidates for one load live with one owner.
 
