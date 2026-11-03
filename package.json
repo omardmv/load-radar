@@ -6,12 +6,15 @@
     "node": ">=22.6"
   },
   "scripts": {
+    "test": "node --test \"src/**/*.test.ts\" \"sims/**/*.test.ts\" \"scorer/**/*.test.ts\"",
+    "test:e2e": "node --test tests/e2e.test.ts",
     "gen": "node sim/gen.ts --loads 100000 --users 5000 --out out",
+    "gen:small": "node sim/gen.ts --loads 8000 --users 300 --hours 2 --out out-small",
     "validate": "node sim/validate.ts out",
     "obs:up": "docker compose up -d",
     "obs:down": "docker compose down",
-    "boards": "node sims/boards-sim.ts",
-    "drive": "node loadtest/poll-driver.ts"
+    "run": "node scripts/run.ts",
+    "score": "node scorer/score.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
