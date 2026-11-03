@@ -2117,7 +2117,7 @@ test('lite counters reach prom-client after flush; timings are sampled', async (
   for (let i = 0; i < 8; i++) { const t = obs.begin(); obs.stage('normalize', t, () => 1); obs.finish(t, { board: 'dat' }); }
   obs.dedup('new');
   let text = await obs.metricsText();
-  assert.match(text, /stage_items_total\{stage="normalize"\} 0/);
+  assert.doesNotMatch(text, /stage_items_total\{stage="normalize"\} \d/);   // nothing reaches prom-client until flush
   obs.flush();
   text = await obs.metricsText();
   assert.match(text, /stage_items_total\{stage="normalize"\} 8/);
@@ -2523,7 +2523,14 @@ export async function startEngine(cfg: EngineConfig) {
       await new Promise((r) => setImmediate(r));
     }
   };
-  const loop = async (fn: () => unknown, simMs: number) => { while (running) { await fn(); await clock.sleep(Math.max(simMs, 5 * clock.speed)); } };
+  // Sleep in short real-time chunks so stop() is noticed quickly (a 10-minute sleep would keep the process alive).
+  const loop = async (fn: () => unknown, simMs: number) => {
+    while (running) {
+      await fn();
+      const until = clock.now() + Math.max(simMs, 5 * clock.speed);
+      while (running && clock.now() < until) await clock.sleep(Math.min(until - clock.now(), 200 * clock.speed));
+    }
+  };
 
   void pumpPolls();
   void pumpProcessing();
