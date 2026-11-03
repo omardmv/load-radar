@@ -10,16 +10,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 
 // ---------- API types (live/server.ts) ----------
 type Lat = { p50: number | null; p95: number | null; p99: number | null }
-type Score = { expected: number; delivered: number; missed: number; missedOpen5Min: number; duplicates: number; unexpected: number; missRate: number; latencySec: Lat }
+type Score = { expected: number; delivered: number; missed: number; missedOpen5Min: number; duplicates: number; unexpected: number; backfill: number; late: number; cancelled: number; missRate: number; latencySec: Lat }
 type Stats = {
   seed: number; now: number; speed: number; loadsPerDay: number; users: number; searches: number
   world: { loads: number; postings: number; perBoard: Record<string, number>; scheduled: number }
   boards: { ok: number; rejected: number; bannedRequests: number; bannedLogins: number }
-  engine: { polls: number; postings: number; newLoads: number; alertsSent: number; alertsDropped: number; alertQueue: number; rawQueue: number; scheduler: { paused: number; banned: number } }
+  engine: { polls: number; postings: number; newLoads: number; alertsSent: number; alertsDropped: number; alertQueue: number; rawQueue: number; scheduler: { paused: number; banned: number; credentials: number } }
   score: { all: Score; you: Score; pending: number }
 }
 type Posting = { at: number; board: string; kind: string; loadId: string; from: string; to: string; equipment: string; rate: number | null; miles: number; pickup: string }
-type Alert = { at: number; lines: string[]; loads: { loadId: string; latencySec: number | null; expected: boolean; backfill?: boolean }[] }
+type Alert = { at: number; lines: string[]; loads: { loadId: string; latencySec: number | null; expected: boolean; backfill?: boolean; late?: boolean }[] }
 type Saved = { spec: { searchId: string }; text: string; summary: string; createdAt: number }
 type Call = { model: string; latencyMs: number; traceId: string | null }
 type Parsed = { result: { equipment: string | null; origin: { city: string; state: string } | null; questions: string[]; sources: Record<string, string> }; summary: string; calls: Call[]; fallback: boolean; error?: string }
@@ -81,6 +81,7 @@ function Controls({ stats }: { stats: Stats }) {
         <div className="w-40"><Slider min={1} max={120} value={[speed]} onValueChange={(v) => setSpeed(Array.isArray(v) ? v[0] : v)}
           onValueCommitted={(v) => post('/api/speed', { speed: Array.isArray(v) ? v[0] : v })} /></div>
         <span className="w-12 text-sm font-medium tabular-nums">{speed}×</span>
+        {speed > 30 && <span className="text-xs text-amber-700">above ~30× one laptop core can't keep up: you are load-testing</span>}
       </div>
       <div className="flex items-center gap-2">
         <span className="text-sm text-muted-foreground">Freight</span>
@@ -121,7 +122,7 @@ function Searches({ saved, setSaved, you }: { saved: Saved[]; setSaved: (f: (s: 
       <CardContent className="flex flex-col gap-3">
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); void (parsed ? save() : check()) }}>
           <Input placeholder="reefer out of fresno, 3.20 min, 100 mi deadhead" value={text} onChange={(e) => { setText(e.target.value); setParsed(null) }} />
-          <Button type="submit" disabled={busy || !text.trim() || Boolean(needsEquip && !equipment)}>{parsed ? 'Save' : 'Check'}</Button>
+          {!parsed && <Button type="submit" disabled={busy || !text.trim()}>{busy ? 'Reading…' : 'Check'}</Button>}
         </form>
         {parsed && (
           <div className="rounded-lg border bg-muted/40 p-3 text-sm">
@@ -140,6 +141,10 @@ function Searches({ saved, setSaved, you }: { saved: Saved[]; setSaved: (f: (s: 
                 <span key={c.traceId ?? c.model}>{c.model} · {c.latencyMs} ms {c.traceId && <a className="underline" href={LANGFUSE + c.traceId} target="_blank">trace</a>} </span>
               ))}
             </div>
+            <div className="mt-3 flex gap-2">
+              <Button size="sm" onClick={save} disabled={busy || Boolean(needsEquip && !equipment)}>{needsEquip && !equipment ? 'Pick equipment to save' : 'Save search'}</Button>
+              <Button size="sm" variant="ghost" onClick={() => setParsed(null)}>Edit</Button>
+            </div>
           </div>
         )}
         <Separator />
@@ -154,7 +159,7 @@ function Searches({ saved, setSaved, you }: { saved: Saved[]; setSaved: (f: (s: 
           <div className="grid grid-cols-4 gap-2 rounded-lg border p-2 text-center text-xs">
             <div><div className="text-muted-foreground">expected</div><div className="text-base font-semibold tabular-nums">{you.expected}</div></div>
             <div><div className="text-muted-foreground">delivered</div><div className="text-base font-semibold tabular-nums">{you.delivered}</div></div>
-            <div><div className="text-muted-foreground">missed</div><div className="text-base font-semibold tabular-nums">{you.missed}</div></div>
+            <div><div className="text-muted-foreground">missed</div><div className="text-base font-semibold tabular-nums">{you.missed}{you.late ? <span className="text-xs font-normal text-muted-foreground"> ({you.late} late)</span> : null}</div></div>
             <div><div className="text-muted-foreground">p50</div><div className="text-base font-semibold tabular-nums">{sec(you.latencySec.p50)}</div></div>
           </div>
         )}
@@ -178,6 +183,7 @@ function Alerts({ alerts }: { alerts: Alert[] }) {
                   <span className="tabular-nums">{central(a.at)}</span>
                   {a.loads.map((x) => x.expected
                     ? <Badge key={x.loadId} variant="secondary">{sec(x.latencySec)} after posting</Badge>
+                    : x.late ? <Badge key={x.loadId} variant="destructive">late: {sec(x.latencySec)} (after the 15 min cutoff)</Badge>
                     : x.backfill ? <Badge key={x.loadId} variant="outline">already on the board when you saved</Badge>
                     : <Badge key={x.loadId} variant="destructive">not in answer key</Badge>)}
                 </div>
@@ -236,11 +242,11 @@ export default function App() {
           <Controls stats={stats} />
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
             <Stat label="Postings" value={n(stats.world.postings)} hint={`${n(Math.round(rates.postings))}/min · ${n(stats.world.loads)} real loads`} />
-            <Stat label="Board requests" value={n(stats.boards.ok)} hint={`${n(stats.boards.rejected)} × 429 · ${stats.boards.bannedLogins} bans`} tone={stats.boards.bannedLogins ? 'bad' : undefined} />
+            <Stat label="Board requests" value={n(stats.boards.ok)} hint={`${n(stats.boards.rejected)} × 429 · ${stats.engine.scheduler.banned} of ${stats.engine.scheduler.credentials} logins banned`} tone={stats.engine.scheduler.banned ? 'bad' : undefined} />
             <Stat label="Alerts sent" value={n(stats.engine.alertsSent)} hint={`${n(Math.round(rates.alerts))}/min · ${stats.engine.alertsDropped} dropped`} />
             <Stat label="Missed" value={pct(all!.missRate)} hint={`${n(all!.missed)} of ${n(all!.delivered + all!.missed)} settled`} tone={missTone} />
             <Stat label="Post → alert p50" value={sec(all!.latencySec.p50)} hint={`p95 ${sec(all!.latencySec.p95)} · p99 ${sec(all!.latencySec.p99)}`} />
-            <Stat label="Duplicates" value={n(all!.duplicates)} hint={`${n(all!.unexpected)} not in answer key`} />
+            <Stat label="Duplicates" value={n(all!.duplicates)} hint={`${n(all!.late)} late · ${n(all!.unexpected)} not in answer key`} />
             <Stat label="Queues" value={n(stats.engine.rawQueue + stats.engine.alertQueue)} hint={`raw ${n(stats.engine.rawQueue)} · alerts ${n(stats.engine.alertQueue)} · ${stats.engine.scheduler.paused} logins paused`} />
           </div>
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[1fr_1fr_1.4fr]">

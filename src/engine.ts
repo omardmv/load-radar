@@ -142,7 +142,14 @@ export async function startEngine(cfg: EngineConfig) {
 
   return {
     // Live mode: the caller changed users or searches in place; rebuild the index and the polling plans.
-    refreshSearches() { matcher = buildMatcher(users.flatMap((u) => u.searches)); rebuildPlans(); },
+    refreshSearches() {
+      matcher = buildMatcher(users.flatMap((u) => u.searches));
+      rebuildPlans();
+      // Alerts still waiting for a removed search are cancelled (one alert can serve several searches: keep it if any is left).
+      const active = new Set(users.flatMap((u) => u.searches.map((x) => x.searchId)));
+      const gone = (a: Alert) => !a.searchIds.some((id) => active.has(id));
+      return alertQueue.removeWhere(gone) + notifier.removeWhere(gone);
+    },
     counts: () => ({ ...counts, alertsDropped: alertQueue.dropped(), alertQueue: alertQueue.size(), pollQueue: pollQueue.size(), rawQueue: rawQueue.size(), scheduler: scheduler.stats() }),
     async stop(): Promise<EngineSummary> {
       running = false;

@@ -8,6 +8,7 @@ export interface AlertQueue {
   size(): number;
   dropped(): number;
   oldestWaitMs(): number;
+  removeWhere(drop: (a: Alert) => boolean): number;
 }
 
 export function createAlertQueue(opts: { clock: Clock; freshAfterMs: number; deadlineMs: number; ttlMs: number }): AlertQueue {
@@ -44,5 +45,7 @@ export function createAlertQueue(opts: { clock: Clock; freshAfterMs: number; dea
     size: () => items.length,
     dropped: () => dropped,
     oldestWaitMs,
+    // A search was deleted: its waiting alerts must not go out.
+    removeWhere(drop) { let n = 0; for (let i = items.length - 1; i >= 0; i--) if (drop(items[i])) { items.splice(i, 1); n++; } return n; },
   };
 }

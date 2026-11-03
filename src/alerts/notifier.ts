@@ -52,6 +52,16 @@ export function createNotifier(opts: {
   return {
     tick,
     held: heldCount,
+    // Alerts already taken from the queue wait here for Telegram's per-chat limit; drop them too.
+    removeWhere(drop: (a: Alert) => boolean) {
+      let n = 0;
+      for (const [chat, list] of held) {
+        const keep = list.filter((a) => !drop(a));
+        n += list.length - keep.length;
+        if (keep.length) held.set(chat, keep); else held.delete(chat);
+      }
+      return n;
+    },
     async run(): Promise<never> {
       for (;;) { await tick(); await opts.clock.sleep(Math.max(50, 5 * opts.clock.speed)); }
     },
