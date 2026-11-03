@@ -155,28 +155,28 @@ Rough stages. The load tests replace these guesses with measurements.
 
 ## Run it
 
+Everything (engine, simulators, models, observability) runs in Docker on the Linux server; see [DEPLOY.md](DEPLOY.md). On the server, from `~/load-radar`:
+
 ```bash
-npm install
-npm run gen:small        # 8,000 loads, 300 users, 2 hours -> out-small/
-node scripts/run.ts --data out-small --speed 30 --minutes 3
+docker compose up -d                                         # models + observability, restart on reboot
+alias app='docker compose run --rm --use-aliases app'        # Node 26 container on the same network
+app node sim/gen.ts --loads 8000 --users 300 --hours 2 --out out-small
+app node scripts/run.ts --data out-small --speed 30 --minutes 3 --otlp http://otel-collector:4318/v1/traces
 ```
 
-The last line printed is `RUN_RESULT {...}`: alerts expected vs delivered, misses, duplicates, latency (simulated seconds), board stats (429s, bans) and engine counters. The same JSON is written to `out-small/run/result.json`.
+The last line printed is `RUN_RESULT {...}`: alerts expected vs delivered, misses, duplicates, latency (simulated seconds), board stats (429s, bans) and engine counters. The same JSON is written to `out-small/run/result.json`. Prometheus scrapes the engine at `app:9464` while it runs.
 
-With observability: `npm run obs:up`, then add `--otlp http://127.0.0.1:4318/v1/traces` to the run. Prometheus is on :9090, Grafana on :3000, Jaeger on :16686. The engine serves metrics on :9464. If no traces show up in Jaeger, check that nothing else is listening on port 4318 (`lsof -nP -iTCP:4318 -sTCP:LISTEN`): a leftover process there swallows spans with a silent `200`.
+From the Mac, the UIs open on localhost through the SSH tunnel: Grafana :3000, Langfuse :3001 (login: `LANGFUSE_INIT_USER_*` in `.env`), Prometheus :9090, Jaeger :16686.
 
 ### Search parser and LLM observability
 
 ```bash
-docker compose up -d                                   # includes Langfuse on :3001 (login: LANGFUSE_INIT_USER_* in .env)
-# GLiNER2 runs on the Linux server (Docker: ml/parser/Dockerfile, restarts on reboot). The Mac reaches it through a
-# self-healing SSH tunnel on localhost:7100, kept alive by launchd: ops/macos/com.loadradar.gliner2-tunnel.plist (install/remove commands inside).
-# or locally: ml/.venv/bin/python ml/parser/service.py 7100 &
-node src/parse/cli.ts --mode hybrid --gliner http://127.0.0.1:7100 --otlp http://127.0.0.1:4318/v1/traces "reefr out of fresno going anywhere"
-node ml/parser/eval.ts --contenders rules,gliner,hybrid,qwen,hybrid-qwen   # needs Ollama with qwen2.5:1.5b-instruct-q8_0
+app node src/parse/cli.ts --mode hybrid --gliner http://gliner2:7100 --otlp http://otel-collector:4318/v1/traces "reefr out of fresno going anywhere"
+app node ml/parser/eval.ts --gliner http://gliner2:7100 --ollama http://ollama:11434 \
+  --otlp http://otel-collector:4318/v1/traces --langfuse http://langfuse-web:3000
 ```
 
-Each model call then appears in Langfuse with the exact prompt, the raw output, tokens and latency, and eval runs attach a correctness score to each call.
+Each model call then appears in Langfuse with the exact prompt, the raw output, tokens and latency, and eval runs attach a correctness score to each call. Qwen runs on the server's CPU: about 16 s per call (vs ~0.5 s on the Mac's GPU), so the Qwen contenders make a full eval take ~15 minutes. The rules + GLiNER2 hybrid stays at ~50 ms.
 
 ### First end-to-end result
 

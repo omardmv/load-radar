@@ -1,6 +1,5 @@
 # GLiNER2 extraction service for the search parser (CPU only).
-#   docker build -t load-radar-gliner2 ml/parser
-#   docker run -d --name gliner2 --restart unless-stopped -p 127.0.0.1:7100:7100 -v gliner2-cache:/root/.cache/huggingface load-radar-gliner2
+#   Built and started by docker-compose.yml (service gliner2, published on the server's 127.0.0.1:7100).
 FROM python:3.12-slim
 # CPU-only PyTorch wheel: a fraction of the size of the default CUDA build.
 RUN pip install --no-cache-dir torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu \
