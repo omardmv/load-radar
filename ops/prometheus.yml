@@ -3,7 +3,7 @@ global:
 scrape_configs:
   - job_name: load-radar-engine
     static_configs:
-      - targets: ["app:9464"]
+      - targets: ["live:9464", "app:9464"]
   - job_name: otel-collector-llm
     static_configs:
       - targets: ["otel-collector:8889"]

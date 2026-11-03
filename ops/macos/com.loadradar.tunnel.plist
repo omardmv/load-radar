@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Keeps an SSH tunnel from this Mac's localhost to the whole stack on the Linux server ("dev" in ~/.ssh/config):
-     Grafana 3000, Langfuse 3001, Prometheus 9090, Jaeger 16686, MinIO 9095, OTLP 4318, GLiNER2 7100,
+     Live UI 8080, Grafana 3000, Langfuse 3001, Prometheus 9090, Jaeger 16686, MinIO 9095, OTLP 4318, GLiNER2 7100,
      and the server's Ollama on local 11435 (11434 stays free for a local Ollama).
      launchd starts it at login and restarts it whenever ssh exits; keep-alives detect a dead connection in ~45 s.
      Install: cp ops/macos/com.loadradar.tunnel.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loadradar.tunnel.plist
@@ -24,6 +24,7 @@
     <string>-L</string><string>9095:127.0.0.1:9095</string>
     <string>-L</string><string>4318:127.0.0.1:4318</string>
     <string>-L</string><string>7100:127.0.0.1:7100</string>
+    <string>-L</string><string>8080:127.0.0.1:8080</string>
     <string>-L</string><string>11435:127.0.0.1:11434</string>
     <string>dev</string>
   </array>

@@ -1,0 +1,9 @@
+**/node_modules
+out*
+.git
+.env
+ml/.venv
+ml/dedup/data
+ui/dist
+data
+bench/overhead/results

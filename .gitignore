@@ -3,3 +3,6 @@ out-small/
 node_modules/
 ml/.venv/
 .env
+data/
+ui/dist/
+ui/node_modules/

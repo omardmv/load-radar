@@ -15,4 +15,9 @@ if git diff --name-only "$from" HEAD | grep -qE '^(package(-lock)?\.json)$'; the
   docker compose run --rm -T app npm ci --omit=dev --no-audit --no-fund
 fi
 docker compose up -d --build --remove-orphans 2>&1 | grep -vE 'Running|Waiting|Healthy' || true
+# Config files are bind-mounted, so compose does not notice edits: restart the services that read them.
+changed=$(git diff --name-only "$from" HEAD)
+grep -q '^ops/prometheus.yml$' <<<"$changed" && docker compose restart prometheus
+grep -q '^ops/otel-collector.yaml$' <<<"$changed" && docker compose restart otel-collector
+grep -q '^ops/grafana/' <<<"$changed" && docker compose restart grafana
 echo "$(date -Is) deploy done"

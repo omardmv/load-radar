@@ -2,7 +2,7 @@
 #   OTel Collector :4318 ─┬─► Jaeger (all traces)                         UI :16686
 #                         ├─► Langfuse (LLM / GenAI spans only)           UI :3001
 #                         └─► Prometheus (span metrics for GenAI spans)   UI :9090
-#   Prometheus also scrapes the engine (app:9464). Grafana :3000 reads Prometheus and Jaeger.
+#   Prometheus scrapes the live engine (live:9464) and batch runs (app:9464). Grafana :3000 reads Prometheus and Jaeger.
 #   Models: gliner2 :7100 (GLiNER2, CPU) and ollama :11434 (Qwen 2.5 1.5B, CPU).
 # Every port is published on the server's 127.0.0.1 only; reach the UIs through the SSH tunnel.
 services:
@@ -14,6 +14,16 @@ services:
     working_dir: /app
     volumes: [".:/app", "app_node_modules:/app/node_modules"]
     command: ["node", "--version"]
+
+  # ---------- Live mode: new data forever + the UI (http://localhost:8080 through the tunnel) ----------
+  live:
+    build: { context: ., dockerfile: live/Dockerfile }
+    restart: unless-stopped
+    command: ["--port", "8080", "--speed", "1", "--loads-per-day", "20000", "--users", "300",
+              "--gliner", "http://gliner2:7100", "--otlp", "http://otel-collector:4318/v1/traces", "--state", "/state"]
+    ports: ["127.0.0.1:8080:8080"]
+    volumes: ["live_state:/state"]          # your saved searches survive restarts and deploys
+    depends_on: [gliner2, otel-collector]
 
   # ---------- Models for the search parser ----------
   gliner2:
@@ -177,6 +187,7 @@ services:
       retries: 10
 
 volumes:
+  live_state:
   app_node_modules:
   gliner2_cache: { name: gliner2-cache, external: true }   # created once on the server; holds the downloaded model
   ollama_models:

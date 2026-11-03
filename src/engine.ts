@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 import { createSimClock, type Clock } from './shared/clock.ts';
 import { createBoundedQueue } from './shared/queue.ts';
 import { createExpiringSet } from './shared/expiring.ts';
-import type { Alert, Load, PlanEntry, RawPosting } from './shared/types.ts';
+import type { Alert, Load, PlanEntry, RawPosting, User } from './shared/types.ts';
 import { loadUsers } from './data/users.ts';
 import { loadGazetteer } from './normalize/gazetteer.ts';
 import { createNormalizer } from './normalize/normalize.ts';
@@ -19,7 +19,7 @@ import { createAlertQueue } from './alerts/alert-queue.ts';
 import { createNotifier } from './alerts/notifier.ts';
 import { setupObs } from './obs/obs.ts';
 
-export type EngineConfig = { dataDir: string; boardsUrl: string; telegramUrl: string; clock: Clock; budgetPerMin: number; connectionsPerBoard: number; metricsPort: number | null; otlpEndpoint: string | null; sampleRate: number; maxUsers: number; bots: number };
+export type EngineConfig = { dataDir?: string; users?: User[]; boardsUrl: string; telegramUrl: string; clock: Clock; budgetPerMin: number; connectionsPerBoard: number; metricsPort: number | null; otlpEndpoint: string | null; sampleRate: number; maxUsers: number; bots: number };
 export type EngineSummary = { polls: number; postings: number; newLoads: number; alertsQueued: number; alertsSent: number; alertsDropped: number; scheduler: SchedulerStats };
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,12 +27,13 @@ const summarize = (l: Load) => `${l.origin.city}, ${l.origin.state} → ${l.dest
 
 export async function startEngine(cfg: EngineConfig) {
   const { clock } = cfg;
-  const all = loadUsers(join(cfg.dataDir, 'searches.ndjson'));
+  // Users come from a dataset file (scored runs) or from the caller (live mode, where the UI adds searches).
+  const all = cfg.users ?? loadUsers(join(cfg.dataDir!, 'searches.ndjson'));
   const users = cfg.maxUsers > 0 ? all.slice(0, cfg.maxUsers) : all;
   const obs = setupObs({ sampleRate: cfg.sampleRate, otlpEndpoint: cfg.otlpEndpoint, metricsPort: cfg.metricsPort });
   const normalize = createNormalizer(loadGazetteer(join(here, '../sim/data')));
   const dedup = createDedup(clock);
-  const matcher = buildMatcher(users.flatMap((u) => u.searches));
+  let matcher = buildMatcher(users.flatMap((u) => u.searches));
   const heat = createHeat(clock);
   const alertQueue = createAlertQueue({ clock, freshAfterMs: 10_000, deadlineMs: 10 * 60_000, ttlMs: 72 * 3_600_000 });
   const counts = { polls: 0, postings: 0, newLoads: 0, alertsQueued: 0, alertsSent: 0 };
@@ -140,6 +141,9 @@ export async function startEngine(cfg: EngineConfig) {
   }, 1_000);
 
   return {
+    // Live mode: the caller changed users or searches in place; rebuild the index and the polling plans.
+    refreshSearches() { matcher = buildMatcher(users.flatMap((u) => u.searches)); rebuildPlans(); },
+    counts: () => ({ ...counts, alertsDropped: alertQueue.dropped(), alertQueue: alertQueue.size(), pollQueue: pollQueue.size(), rawQueue: rawQueue.size(), scheduler: scheduler.stats() }),
     async stop(): Promise<EngineSummary> {
       running = false;
       clearInterval(gaugeTimer);

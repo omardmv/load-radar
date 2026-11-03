@@ -153,6 +153,17 @@ Rough stages. The load tests replace these guesses with measurements.
 | Board and Telegram simulators, scheduler, pollers, full engine, scorer, end-to-end run | ✅ Built (Day 1); first scored run above. No automated tests by choice: checked by scored runs (LLD §15) |
 | Trained dedup classifier, LLM search parser, dashboards, load tests | ⏳ Day 2 |
 
+## Live mode (try it yourself)
+
+Open **http://localhost:8080** (served by the server, through the tunnel). The `live` service never stops and makes a new world every time it starts:
+
+- **New data all the time.** Loads arrive as they would on a real board ([sim/world.ts](sim/world.ts), the same calibrated model the batch generator uses), following the US Central day: busy 7–12, quiet overnight. Each load spreads into postings over its life: refreshes, reposts with new ids, copies on other boards, a co-broker. 300 synthetic dispatchers with ~1,100 saved searches poll the boards alongside you.
+- **You are a dispatcher.** Type a search in plain English; the parser (rules + GLiNER2, every call traced in Langfuse) shows what it understood and asks when something is unclear. Save it, and alerts arrive the way the Telegram bot would send them.
+- **Scored live.** The answer key is built as each load is born, so the page shows misses, duplicates and post-to-alert latency for everyone and for you, in real time.
+- **Push it.** Speed slider (1–120×), freight volume (10K–100K loads/day), and burst buttons (500 loads out of one market at once) to watch queues, 429s and latency react; Grafana shows the same from the engine's metrics.
+
+Code: [live/](live/) (stream, live scorer, API) and [ui/](ui/) (React + shadcn/ui). UI development: `cd ui && npm run dev` (proxies `/api` to localhost:8080).
+
 ## Run it
 
 Everything (engine, simulators, models, observability) runs in Docker on the Linux server; see [DEPLOY.md](DEPLOY.md). On the server, from `~/load-radar`:

@@ -4,7 +4,7 @@ One Linux server ("dev": Ubuntu 24.04, Ryzen 7 3700U 4C/8T, 14 GB RAM, no GPU) r
 
 ```
 Mac                                   Server (Docker Compose, ~/load-radar)
- browser ──► localhost:3000..16686 ─SSH─► 127.0.0.1:<port> ─► grafana, langfuse-web, prometheus, jaeger, minio
+ browser ──► localhost:8080..16686 ─SSH─► 127.0.0.1:<port> ─► live (UI), grafana, langfuse-web, prometheus, jaeger, minio
  code    ──► git push ─► GitHub ─► git pull ► ~/load-radar ─► app (node:26, on demand): engine, simulators, eval
                                                           ├─► gliner2 :7100   (GLiNER2, CPU)
                                                           ├─► ollama  :11434  (Qwen 2.5 1.5B, CPU)
@@ -13,17 +13,19 @@ Mac                                   Server (Docker Compose, ~/load-radar)
 
 Every port is published on the server's 127.0.0.1 only, so nothing is open on the LAN or Tailscale; access goes through SSH.
 
-## Ship a change
+## Ship a change (continuous deploy)
 
 The server's `~/load-radar` is a clone of https://github.com/omardmv/load-radar (public, so no key is needed to pull).
+Every minute, cron runs [ops/server/deploy.sh](ops/server/deploy.sh): if `main` on GitHub has a new commit, it
+fast-forwards, rebuilds what changed (`docker compose up -d --build`), and restarts services whose bind-mounted
+config changed. The server only talks out to GitHub: no secrets, no runner, no open ports. So shipping is just:
 
 ```bash
-git push                                                    # on the Mac
-ssh dev 'cd ~/load-radar && git pull --ff-only && docker compose up -d --build'
-ssh dev 'cd ~/load-radar && git log --oneline -1'           # what is deployed
+git push
+ssh dev tail -5 ~/load-radar-deploy.log                     # what was deployed, and when
 ```
 
-`.env` is gitignored and copied once by hand (`scp .env dev:~/load-radar/ && ssh dev chmod 600 ~/load-radar/.env`). Generated data (`out*/`) stays on the server.
+`.env` is gitignored and copied once by hand (`scp .env dev:~/load-radar/ && ssh dev chmod 600 ~/load-radar/.env`). Generated data (`out*/`) and live state (volume `live_state`) stay on the server.
 
 ## First setup on a new server
 
@@ -34,13 +36,14 @@ ssh dev 'docker volume create gliner2-cache'                 # external volume f
 ssh dev 'cd ~/load-radar && docker compose up -d --build \
   && docker compose exec -T ollama ollama pull qwen2.5:1.5b-instruct-q8_0 \
   && docker compose run --rm -T app npm ci --omit=dev'
+ssh dev '(crontab -l; echo "* * * * * ~/load-radar/ops/server/deploy.sh >> ~/load-radar-deploy.log 2>&1") | crontab -'
 ```
 
 If the repo goes private, add a read-only deploy key: `ssh-keygen -t ed25519 -f ~/.ssh/load_radar_deploy` on the server, then `gh repo deploy-key add` with the `.pub` file, and clone over SSH.
 
 ## Tunnel from the Mac
 
-`ops/macos/com.loadradar.tunnel.plist` is a launchd agent: it starts at login, restarts ssh whenever it drops, and forwards 3000, 3001, 9090, 16686, 9095, 4318, 7100, and the server's Ollama on local 11435. Install and remove commands are in the file.
+`ops/macos/com.loadradar.tunnel.plist` is a launchd agent: it starts at login, restarts ssh whenever it drops, and forwards 8080 (live UI), 3000, 3001, 9090, 16686, 9095, 4318, 7100, and the server's Ollama on local 11435. Install and remove commands are in the file.
 
 ## Restarts
 

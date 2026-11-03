@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { createSimClock, type Clock } from '../src/shared/clock.ts';
 import { createTokenBucket, type TokenBucket } from '../src/shared/bucket.ts';
 
-export type Delivery = { botId: string; chatId: string; at: number; loads: { loadKey: string; canonicalId: string; postedAt: number }[] };
+export type Delivery = { botId: string; chatId: string; at: number; text?: string; loads: { loadKey: string; canonicalId: string; postedAt: number }[] };
 
 export function createTelegramHandler(opts: { clock: Clock; perBotPerSec: number; perChatPerSec: number; onDelivered(d: Delivery): void }) {
   const bots = new Map<string, TokenBucket>();
@@ -37,7 +37,7 @@ export function createTelegramHandler(opts: { clock: Clock; perBotPerSec: number
       }
       bot.take(); chat.take();
       stats.delivered++;
-      opts.onDelivered({ botId: m[1], chatId: String(body.chat_id), at: now, loads: body.meta?.loads ?? [] });
+      opts.onDelivered({ botId: m[1], chatId: String(body.chat_id), at: now, text: body.text, loads: body.meta?.loads ?? [] });
       reply(res, 200, { ok: true });
     });
   }, { stats });
