@@ -1,0 +1,25 @@
+# Observability only (no Redis): OTel Collector -> Jaeger for traces; Prometheus scrapes the engine on :9464.
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./ops/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["4318:4318"]
+    depends_on: [jaeger]
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    ports: ["16686:16686"]
+  prometheus:
+    image: prom/prometheus:latest
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--enable-feature=exemplar-storage"]
+    volumes: ["./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes: ["./ops/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro"]
+    ports: ["3000:3000"]
+    depends_on: [prometheus, jaeger]
