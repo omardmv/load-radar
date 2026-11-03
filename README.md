@@ -169,7 +169,8 @@ With observability: `npm run obs:up`, then add `--otlp http://127.0.0.1:4318/v1/
 
 ```bash
 docker compose up -d                                   # includes Langfuse on :3001 (login: LANGFUSE_INIT_USER_* in .env)
-ml/.venv/bin/python ml/parser/service.py 7100 &        # GLiNER2 service (first start ~1 min)
+ssh -f -N -L 7100:127.0.0.1:7100 dev                   # GLiNER2 runs on the Linux server (Docker: ml/parser/Dockerfile); tunnel to it
+# or locally: ml/.venv/bin/python ml/parser/service.py 7100 &
 node src/parse/cli.ts --mode hybrid --gliner http://127.0.0.1:7100 --otlp http://127.0.0.1:4318/v1/traces "reefr out of fresno going anywhere"
 node ml/parser/eval.ts --contenders rules,gliner,hybrid,qwen,hybrid-qwen   # needs Ollama with qwen2.5:1.5b-instruct-q8_0
 ```
