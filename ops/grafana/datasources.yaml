@@ -1,8 +1,6 @@
 apiVersion: 1
 # Metrics (Prometheus), traces (Tempo) and logs (Loki), linked both ways:
 #   a log line -> its trace (trace_id), a span -> its logs, a latency exemplar -> its trace.
-deleteDatasources:
-  - { name: Jaeger, orgId: 1 }
 datasources:
   - name: Prometheus
     uid: prometheus
