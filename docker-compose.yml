@@ -1,8 +1,9 @@
 # Everything runs on one Linux server (see DEPLOY.md). Secrets come from .env (see .env.example).
-#   OTel Collector :4318 ─┬─► Jaeger (all traces)                         UI :16686
+#   OTel Collector :4318 ─┬─► Tempo (all traces)                          in Grafana
+#                         ├─► Loki (structured logs, linked to traces)    in Grafana
 #                         ├─► Langfuse (LLM / GenAI spans only)           UI :3001
 #                         └─► Prometheus (span metrics for GenAI spans)   UI :9090
-#   Prometheus scrapes the live engine (live:9464) and batch runs (app:9464). Grafana :3000 reads Prometheus and Jaeger.
+#   Prometheus scrapes the live engine (live:9464) and batch runs (app:9464). Grafana :3000 reads Prometheus, Tempo and Loki.
 #   Models: gliner2 :7100 (GLiNER2, CPU) and ollama :11434 (Qwen 2.5 1.5B, CPU).
 # Every port is published on the server's 127.0.0.1 only; reach the UIs through the SSH tunnel.
 services:
@@ -47,11 +48,18 @@ services:
     environment:
       - LANGFUSE_OTEL_AUTH=${LANGFUSE_OTEL_AUTH}
     ports: ["127.0.0.1:4318:4318"]
-    depends_on: [jaeger]
-  jaeger:
+    depends_on: [tempo, loki]
+  tempo:
+    image: grafana/tempo:2.8.2
     restart: unless-stopped
-    image: jaegertracing/jaeger:latest
-    ports: ["127.0.0.1:16686:16686"]
+    user: "0"                          # writes to the named volume without a chown step
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes: ["./ops/tempo.yaml:/etc/tempo.yaml:ro", "tempo_data:/var/tempo"]
+  loki:
+    image: grafana/loki:3.5.5
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/local-config.yaml"]   # single binary, local disk, native OTLP ingest
+    volumes: ["loki_data:/loki"]
   prometheus:
     restart: unless-stopped
     image: prom/prometheus:latest
@@ -66,7 +74,7 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes: ["./ops/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro"]
     ports: ["127.0.0.1:3000:3000"]
-    depends_on: [prometheus, jaeger]
+    depends_on: [prometheus, tempo, loki]
 
   # ---------- Langfuse v4, self-hosted (LLM observability) ----------
   # Based on the official langfuse/langfuse docker-compose.yml. Only the web UI (3001) and MinIO (9095,
@@ -187,6 +195,8 @@ services:
       retries: 10
 
 volumes:
+  tempo_data:
+  loki_data:
   live_state:
   app_node_modules:
   gliner2_cache: { name: gliner2-cache, external: true }   # created once on the server; holds the downloaded model

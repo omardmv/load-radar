@@ -22,10 +22,13 @@ type Posting = { at: number; board: string; kind: string; loadId: string; from: 
 type Alert = { at: number; lines: string[]; loads: { loadId: string; latencySec: number | null; expected: boolean; backfill?: boolean; late?: boolean }[] }
 type Saved = { spec: { searchId: string }; text: string; summary: string; createdAt: number }
 type Call = { model: string; latencyMs: number; traceId: string | null }
-type Parsed = { result: { equipment: string | null; origin: { city: string; state: string } | null; questions: string[]; sources: Record<string, string> }; summary: string; calls: Call[]; fallback: boolean; error?: string }
+type Parsed = { result: { equipment: string | null; origin: { city: string; state: string } | null; questions: string[]; sources: Record<string, string> }; summary: string; calls: Call[]; fallback: boolean; error?: string; requestTraceId?: string | null }
 
 const LANGFUSE = 'http://localhost:3001/project/load-radar-parser/traces/'
-const LINKS = [['Grafana', 'http://localhost:3000'], ['Langfuse', 'http://localhost:3001'], ['Jaeger', 'http://localhost:16686'], ['Prometheus', 'http://localhost:9090']]
+const GRAFANA = 'http://localhost:3000'
+const LINKS = [['Grafana', GRAFANA], ['Traces', `${GRAFANA}/a/grafana-exploretraces-app/explore`], ['Logs', `${GRAFANA}/a/grafana-lokiexplore-app/explore`], ['Langfuse', 'http://localhost:3001'], ['Prometheus', 'http://localhost:9090']]
+// One request's full timeline (every step, the model's input and output) in Grafana's trace view.
+const timeline = (traceId: string) => `${GRAFANA}/explore?schemaVersion=1&panes=${encodeURIComponent(JSON.stringify({ a: { datasource: 'tempo', queries: [{ refId: 'A', datasource: { type: 'tempo', uid: 'tempo' }, queryType: 'traceql', query: traceId }], range: { from: 'now-1h', to: 'now' } } }))}`
 const EQUIP = ['van', 'reefer', 'flatbed']
 const BURSTS = [['Chicago', 'van'], ['Dallas', 'flatbed'], ['Fresno', 'reefer']]
 
@@ -138,8 +141,9 @@ function Searches({ saved, setSaved, you }: { saved: Saved[]; setSaved: (f: (s: 
             <div className="mt-2 text-xs text-muted-foreground">
               {parsed.fallback && 'GLiNER2 unreachable, rules only. '}
               {parsed.calls.length === 0 ? 'No model call needed: rules understood everything.' : parsed.calls.map((c) => (
-                <span key={c.traceId ?? c.model}>{c.model} · {c.latencyMs} ms {c.traceId && <a className="underline" href={LANGFUSE + c.traceId} target="_blank">trace</a>} </span>
+                <span key={c.traceId ?? c.model}>{c.model} · {c.latencyMs} ms {c.traceId && <a className="underline" href={LANGFUSE + c.traceId} target="_blank">model call in Langfuse</a>} </span>
               ))}
+              {parsed.requestTraceId && <> · <a className="underline" href={timeline(parsed.requestTraceId)} target="_blank">request timeline in Grafana</a></>}
             </div>
             <div className="mt-3 flex gap-2">
               <Button size="sm" onClick={save} disabled={busy || Boolean(needsEquip && !equipment)}>{needsEquip && !equipment ? 'Pick equipment to save' : 'Save search'}</Button>

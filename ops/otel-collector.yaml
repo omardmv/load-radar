@@ -1,6 +1,7 @@
-# One OTLP input, two trace pipelines:
-#   traces        everything            -> Jaeger
+# One OTLP input:
+#   traces        everything            -> Tempo (Grafana: Explore, Traces Drilldown)
 #   traces/genai  only LLM/model calls  -> Langfuse (prompt, output, tokens) + span metrics for Prometheus
+#   logs          structured app logs   -> Loki (Grafana: Logs Drilldown), each line carries its trace_id
 receivers:
   otlp:
     protocols:
@@ -29,8 +30,8 @@ connectors:
         buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s]
 
 exporters:
-  otlp_grpc/jaeger:
-    endpoint: jaeger:4317
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
     tls:
       insecure: true
   otlphttp/langfuse:
@@ -40,13 +41,15 @@ exporters:
       x-langfuse-ingestion-version: "4"
   prometheus:
     endpoint: 0.0.0.0:8889
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp_grpc/jaeger]
+      exporters: [otlp_grpc/tempo]
     traces/genai:
       receivers: [otlp]
       processors: [filter/genai, batch]
@@ -54,3 +57,7 @@ service:
     metrics/llm:
       receivers: [spanmetrics]
       exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki]

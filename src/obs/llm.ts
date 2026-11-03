@@ -3,7 +3,8 @@
 // turns them into Prometheus metrics (llm_calls_total, llm_duration_*), and Jaeger keeps them with everything else.
 // Code only speaks OpenTelemetry, so Langfuse can be swapped for another backend in collector config.
 import { SpanKind, SpanStatusCode, type Tracer } from '@opentelemetry/api';
-import { BasicTracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 
@@ -11,10 +12,13 @@ export type LlmTracing = { tracer: Tracer | null; shutdown(): Promise<void> };
 
 export function setupLlmTracing(opts: { endpoint: string | null; serviceName: string }): LlmTracing {
   if (!opts.endpoint) return { tracer: null, shutdown: async () => {} };
-  const provider = new BasicTracerProvider({
+  // Node provider + register(): the active span follows async calls, so a model call made while handling a request
+  // becomes a child of that request's span (one trace per request: every step, the prompt, the output).
+  const provider = new NodeTracerProvider({
     resource: resourceFromAttributes({ 'service.name': opts.serviceName }),
-    spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter({ url: opts.endpoint }))],
+    spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter({ url: opts.endpoint }), { scheduledDelayMillis: 1_000 })],
   });
+  provider.register();
   return { tracer: provider.getTracer('load-radar-llm'), shutdown: async () => { await provider.forceFlush(); await provider.shutdown(); } };
 }
 

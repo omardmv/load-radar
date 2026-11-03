@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname, extname, join, normalize as normPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { SpanKind, SpanStatusCode, type Span } from '@opentelemetry/api';
 import { createAdjustableClock } from '../src/shared/clock.ts';
 import { BOARDS, type SearchSpec, type User, type Equip } from '../src/shared/types.ts';
 import { toUser } from '../src/data/users.ts';
@@ -21,6 +22,7 @@ import { createGlinerExtractor } from '../src/parse/gliner.ts';
 import { describe } from '../src/parse/normalize.ts';
 import type { ModelCall } from '../src/parse/types.ts';
 import { setupLlmTracing } from '../src/obs/llm.ts';
+import { setupLogs } from '../src/obs/log.ts';
 import { createStream } from './stream.ts';
 import { createLiveScore } from './score.ts';
 
@@ -31,6 +33,17 @@ const { values: a } = parseArgs({ options: {
   state: { type: 'string', default: 'data/live' } } });
 
 const here = dirname(fileURLToPath(import.meta.url));
+// Traces: one per API request (every step, the model's input and output) -> collector -> Tempo; model spans also -> Langfuse.
+// Logs: one JSON line per event -> stdout and collector -> Loki, carrying the trace id.
+const otlp = a.otlp === 'off' ? null : a.otlp!;
+const tracing = setupLlmTracing({ endpoint: otlp, serviceName: 'load-radar-live' });
+const { log } = setupLogs({ endpoint: otlp ? otlp.replace(/\/v1\/traces$/, '/v1/logs') : null, serviceName: 'load-radar-live' });
+const span = async <T>(name: string, attrs: Record<string, string | number | boolean>, fn: (s: Span | null) => Promise<T> | T): Promise<T> => {
+  if (!tracing.tracer) return fn(null);
+  return tracing.tracer.startActiveSpan(name, { attributes: attrs }, async (s) => {
+    try { return await fn(s); } catch (e) { s.recordException(e as Error); s.setStatus({ code: SpanStatusCode.ERROR, message: String(e) }); throw e; } finally { s.end(); }
+  });
+};
 const YOU = 'you';
 const seed = a.seed ? Number(a.seed) : (Date.now() & 0x7fffffff);       // new world every start unless pinned
 const clock = createAdjustableClock({ simStart: Date.now(), speed: Number(a.speed) });
@@ -66,6 +79,7 @@ const telegram = createTelegramHandler({ clock, perBotPerSec: 30, perChatPerSec:
   const alert = { at: d.at, lines: (d.text ?? '').split('\n'), loads: checked };
   ring(recentAlerts, alert, 100);
   send('alert', alert);
+  for (const x of checked) log('info', 'alert.sent', { user: d.chatId, load_id: x.loadId, latency_sec: x.latencySec ?? undefined, expected: x.expected, late: x.late, backfill: x.backfill, text: alert.lines.join(' | ') });
 } });
 await new Promise<void>((r) => createServer(boards).listen(7001, '127.0.0.1', r));
 await new Promise<void>((r) => createServer(telegram).listen(7002, '127.0.0.1', r));
@@ -80,15 +94,19 @@ const snapshot = () => ({ seed, now: clock.now(), speed: clock.speed, loadsPerDa
 setInterval(() => send('stats', snapshot()), 1_000);
 
 // ---------- search parser (hybrid: rules + GLiNER2, every model call traced to Langfuse) ----------
-const tracing = setupLlmTracing({ endpoint: a.otlp === 'off' ? null : a.otlp!, serviceName: 'load-radar-live' });
 const places = createPlaceIndex(join(here, '../sim/data'));
 const gliner = createGlinerExtractor(a.gliner!, { tracer: tracing.tracer });
 async function parse(text: string) {
-  const calls: ModelCall[] = [];
-  const go = (mode: 'hybrid' | 'rules') => parseSearch(text, { places, mode, extractor: mode === 'hybrid' ? gliner : undefined, onModelCall: (c) => calls.push(c), context: { sessionId: 'live-ui' } });
-  let result, fallback = false;
-  try { result = await go('hybrid'); } catch { result = await go('rules'); fallback = true; }   // model down: rules still work
-  return { result, summary: describe(result), calls: calls.map((c) => ({ model: c.model, latencyMs: Math.round(c.latencyMs), traceId: c.traceId })), fallback };
+  return span('parse.search', { 'search.text': text, 'parse.mode': 'hybrid' }, async (s) => {
+    const calls: ModelCall[] = [];
+    const go = (mode: 'hybrid' | 'rules') => parseSearch(text, { places, mode, extractor: mode === 'hybrid' ? gliner : undefined, onModelCall: (c) => calls.push(c), context: { sessionId: 'live-ui' } });
+    let result, fallback = false;
+    try { result = await go('hybrid'); } catch (e) { log('warn', 'parse.model_unavailable', { error: String(e) }); result = await go('rules'); fallback = true; }   // model down: rules still work
+    const summary = describe(result);
+    s?.setAttributes({ 'parse.summary': summary, 'parse.sources': JSON.stringify(result.sources), 'parse.questions': result.questions.join(' | '), 'parse.model_calls': calls.length, 'parse.fallback': fallback });
+    log('info', 'search.parsed', { text, summary, model_calls: calls.length, questions: result.questions.join(' | ') || undefined, fallback });
+    return { result, summary, calls: calls.map((c) => ({ model: c.model, latencyMs: Math.round(c.latencyMs), traceId: c.traceId })), fallback };
+  });
 }
 
 // ---------- HTTP API + static UI ----------
@@ -98,8 +116,23 @@ const uiDir = join(here, '../ui/dist');
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 let nextSearch = saved.reduce((n, s) => Math.max(n, Number(s.spec.searchId.slice(1))), 0);
 
-createServer(async (req, res) => {
+// Saving or removing a search: rebuild the engine's index and polling plans, cancel orphaned alerts, rebuild the answer key.
+const refresh = () => span('engine.refresh_searches', {}, (s) => {
+  const cancelled = engine.refreshSearches();
+  score.rebuild();
+  s?.setAttributes({ 'searches.total': users.reduce((n, u) => n + u.searches.length, 0), 'alerts.cancelled': cancelled });
+  return cancelled;
+});
+
+createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://live');
+  const traced = url.pathname.startsWith('/api/') && url.pathname !== '/api/events' && url.pathname !== '/api/state';
+  if (!traced || !tracing.tracer) return void handle(req, res, url, null);
+  tracing.tracer.startActiveSpan(`${req.method} ${url.pathname.replace(/\/Y\d+$/, '/:id')}`, { kind: SpanKind.SERVER, attributes: { 'http.request.method': req.method ?? '', 'url.path': url.pathname } },
+    async (s) => { await handle(req, res, url, s); s.setAttribute('http.response.status_code', res.statusCode); if (res.statusCode >= 500) s.setStatus({ code: SpanStatusCode.ERROR }); s.end(); });
+}).listen(Number(a.port), '0.0.0.0', () => log('info', 'live.started', { port: Number(a.port), seed, users: users.length, speed: clock.speed }));
+
+async function handle(req: IncomingMessage, res: ServerResponse, url: URL, reqSpan: Span | null) {
   try {
     if (url.pathname === '/api/state') return json(res, 200, { ...snapshot(), you: saved, postings: recentPostings, alerts: recentAlerts });
     if (url.pathname === '/api/events') {
@@ -108,7 +141,7 @@ createServer(async (req, res) => {
       clients.add(res); req.on('close', () => clients.delete(res));
       return;
     }
-    if (url.pathname === '/api/parse' && req.method === 'POST') return json(res, 200, await parse(String((await body(req)).text ?? '')));
+    if (url.pathname === '/api/parse' && req.method === 'POST') return json(res, 200, { ...(await parse(String((await body(req)).text ?? ''))), requestTraceId: reqSpan?.spanContext().traceId ?? null });
     if (url.pathname === '/api/searches' && req.method === 'POST') {
       const b = await body(req);
       const p = await parse(String(b.text ?? ''));
@@ -119,20 +152,28 @@ createServer(async (req, res) => {
         dest: r.dest ?? { kind: 'anywhere' }, equipment, minRpm: b.minRpm === undefined ? r.minRpm : b.minRpm, includeNoRate: true, pickupWithinDays: 3 };
       const s: SavedSearch = { spec, text: String(b.text), summary: describe({ ...r, equipment, minRpm: spec.minRpm, deadheadMi: spec.deadheadMi, dest: r.dest ?? { kind: 'anywhere' } }), createdAt: clock.now() };
       saved.push(s); you.searches.push(spec); createdAt.set(spec.searchId, s.createdAt);
-      persist(); engine.refreshSearches(); score.rebuild();
-      return json(res, 200, { search: s, ...p });
+      persist();
+      await refresh();
+      log('info', 'search.saved', { search_id: spec.searchId, summary: s.summary, text: s.text });
+      return json(res, 200, { search: s, ...p, requestTraceId: reqSpan?.spanContext().traceId ?? null });
     }
     const del = /^\/api\/searches\/(\w+)$/.exec(url.pathname);
     if (del && req.method === 'DELETE') {
       const i = saved.findIndex((s) => s.spec.searchId === del[1]);
-      if (i >= 0) { saved.splice(i, 1); you.searches.splice(you.searches.findIndex((s) => s.searchId === del[1]), 1); persist(); engine.refreshSearches(); score.rebuild(); }
+      if (i >= 0) {
+        saved.splice(i, 1); you.searches.splice(you.searches.findIndex((s) => s.searchId === del[1]), 1); persist();
+        const cancelled = await refresh();
+        log('info', 'search.removed', { search_id: del[1], alerts_cancelled: cancelled });
+      }
       return json(res, 200, { ok: true });
     }
-    if (url.pathname === '/api/speed' && req.method === 'POST') { clock.setSpeed(Math.min(120, Math.max(1, Number((await body(req)).speed) || 1))); return json(res, 200, { speed: clock.speed }); }
-    if (url.pathname === '/api/rate' && req.method === 'POST') { stream.setLoadsPerDay(Math.min(500_000, Math.max(1_000, Number((await body(req)).loadsPerDay) || 20_000))); return json(res, 200, { loadsPerDay: stream.loadsPerDay }); }
+    if (url.pathname === '/api/speed' && req.method === 'POST') { clock.setSpeed(Math.min(120, Math.max(1, Number((await body(req)).speed) || 1))); log('info', 'control.speed', { speed: clock.speed }); return json(res, 200, { speed: clock.speed }); }
+    if (url.pathname === '/api/rate' && req.method === 'POST') { stream.setLoadsPerDay(Math.min(500_000, Math.max(1_000, Number((await body(req)).loadsPerDay) || 20_000))); log('info', 'control.volume', { loads_per_day: stream.loadsPerDay }); return json(res, 200, { loadsPerDay: stream.loadsPerDay }); }
     if (url.pathname === '/api/burst' && req.method === 'POST') {
       const b = await body(req);
-      stream.burst(String(b.city ?? 'Chicago'), (b.equipment ?? 'van') as Equip, Math.min(5_000, Number(b.count) || 500));
+      const city = String(b.city ?? 'Chicago'), equipment = (b.equipment ?? 'van') as Equip, count = Math.min(5_000, Number(b.count) || 500);
+      await span('world.burst', { city, equipment, count }, () => stream.burst(city, equipment, count));
+      log('info', 'control.burst', { city, equipment, count });
       return json(res, 200, { ok: true });
     }
     if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'not_found' });
@@ -142,5 +183,5 @@ createServer(async (req, res) => {
     if (!existsSync(target)) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('UI not built: cd ui && npm run build'); return; }
     res.writeHead(200, { 'content-type': MIME[extname(target)] ?? 'application/octet-stream' });
     res.end(readFileSync(target));
-  } catch (e) { json(res, 500, { error: String(e) }); }
-}).listen(Number(a.port), '0.0.0.0', () => console.log(`live on :${a.port} (seed ${seed}, ${users.length} users, speed ${clock.speed}x)`));
+  } catch (e) { log('error', 'api.error', { path: url.pathname, error: String(e) }); json(res, 500, { error: String(e) }); }
+}
