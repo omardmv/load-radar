@@ -72,7 +72,10 @@ services:
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-    volumes: ["./ops/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro"]
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/load-radar.json
+    volumes: ["./ops/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro",
+              "./ops/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro",
+              "./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro"]
     ports: ["127.0.0.1:3000:3000"]
     depends_on: [prometheus, tempo, loki]
 
