@@ -156,7 +156,7 @@ services:
     volumes: [langfuse_minio_data:/data]
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
-      interval: 1s
+      interval: 10s                        # official compose uses 1s; that cost ~6% of a core on this laptop
       timeout: 5s
       retries: 5
       start_period: 1s
