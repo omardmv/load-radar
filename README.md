@@ -162,7 +162,7 @@ node scripts/run.ts --data out-small --speed 30 --minutes 3
 
 The last line printed is `RUN_RESULT {...}`: alerts expected vs delivered, misses, duplicates, latency (simulated seconds), board stats (429s, bans) and engine counters. The same JSON is written to `out-small/run/result.json`.
 
-With observability: `npm run obs:up`, then add `--otlp http://127.0.0.1:4318/v1/traces` to the run. Prometheus is on :9090, Grafana on :3000, Jaeger on :16686. The engine serves metrics on :9464.
+With observability: `npm run obs:up`, then add `--otlp http://127.0.0.1:4318/v1/traces` to the run. Prometheus is on :9090, Grafana on :3000, Jaeger on :16686. The engine serves metrics on :9464. If no traces show up in Jaeger, check that nothing else is listening on port 4318 (`lsof -nP -iTCP:4318 -sTCP:LISTEN`): a leftover process there swallows spans with a silent `200`.
 
 ### First end-to-end result
 
