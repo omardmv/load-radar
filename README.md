@@ -33,7 +33,8 @@ This is an interview project for Numeo, which builds AI agents for trucking. The
 
 The project goes deep on two areas: **backend/infrastructure** (scaling, measurement, observability) and **AI/ML**, where the system genuinely needs it:
 - **ML: same-load classifier** for dedup. The simple rule wrongly merged 12% of loads; the classifier is trained on the generator's answer key, and its effect on misses and duplicates is measured end to end.
-- **LLM: search parser.** Rules first, an LLM fallback with structured output, an eval set, regression tests, guardrails, and full LLM call logging (prompt, model, tokens, latency, cost).
+- **Search parser: rules + a small model.** Rules handle dispatcher shorthand; a small local model (GLiNER2, or Qwen via Ollama) fills what the rules miss; one normalizer resolves places, regions and typos and asks instead of guessing. Five contenders compared on one eval set: [ml/parser/RESULTS.md](ml/parser/RESULTS.md).
+- **LLM observability:** every model call is an OpenTelemetry GenAI span, routed to self-hosted **Langfuse** (prompt, output, tokens, latency, eval scores), Jaeger and Prometheus. See OBSERVABILITY.md §8b.
 
 No frontend: the user-facing side is shown through the simulators, the scorer and the dashboards.
 
@@ -163,6 +164,17 @@ node scripts/run.ts --data out-small --speed 30 --minutes 3
 The last line printed is `RUN_RESULT {...}`: alerts expected vs delivered, misses, duplicates, latency (simulated seconds), board stats (429s, bans) and engine counters. The same JSON is written to `out-small/run/result.json`.
 
 With observability: `npm run obs:up`, then add `--otlp http://127.0.0.1:4318/v1/traces` to the run. Prometheus is on :9090, Grafana on :3000, Jaeger on :16686. The engine serves metrics on :9464. If no traces show up in Jaeger, check that nothing else is listening on port 4318 (`lsof -nP -iTCP:4318 -sTCP:LISTEN`): a leftover process there swallows spans with a silent `200`.
+
+### Search parser and LLM observability
+
+```bash
+docker compose up -d                                   # includes Langfuse on :3001 (login: LANGFUSE_INIT_USER_* in .env)
+ml/.venv/bin/python ml/parser/service.py 7100 &        # GLiNER2 service (first start ~1 min)
+node src/parse/cli.ts --mode hybrid --gliner http://127.0.0.1:7100 --otlp http://127.0.0.1:4318/v1/traces "reefr out of fresno going anywhere"
+node ml/parser/eval.ts --contenders rules,gliner,hybrid,qwen,hybrid-qwen   # needs Ollama with qwen2.5:1.5b-instruct-q8_0
+```
+
+Each model call then appears in Langfuse with the exact prompt, the raw output, tokens and latency, and eval runs attach a correctness score to each call.
 
 ### First end-to-end result
 

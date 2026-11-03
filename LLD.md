@@ -166,21 +166,21 @@ The simulator replays `postings.ndjson` on a clock (real time or N× speed). It 
 
 ### 6.1 Search parser
 
+Code: `src/parse/`. Measured comparison: `ml/parser/RESULTS.md`. LLM observability: OBSERVABILITY.md §8b.
+
 ```
-parse(text):
-  t = normalize(text)                      // lowercase, unify "$", "->", "dh"
-  fields = rules(t)                        // see below
-  conf = confidence(fields)                // 1.0 = every required field found exactly once, no leftovers
-  if conf >= 0.8: return {spec: fields, parser: 'rules'}
-  out = llm(text, schema=SearchSpecSchema) // structured output; logged (section 10.3)
-  if !validate(out): return error "couldn't understand, please use the form"
-  return {spec: out, parser: 'llm'}
+extract spans:   rules (regex)  ──► model only if rules miss equipment or origin (GLiNER2 service, or Qwen via Ollama)
+normalize:       places (exact, alias, typo, ambiguity) · states · regions · numbers · defaults
+questions:       missing equipment, unknown or ambiguous places, directions ("north"), "LA" (Louisiana or Los Angeles?)
+confirm:         "Reefer · within 100 mi of Fresno, CA → anywhere · ≥ $3.40/mi"
 ```
 
-- **Rules:** equipment words (`van|dry van|reefer|flatbed|step deck|fd|vr`); money `\$?(\d+(\.\d+)?)\s*(\/mi|a mile|rpm)`; radius `(\d+)\s*(mi|mile)s?( radius| deadhead)?|dh\s*(\d+)`; places from the gazetteer (`sim/data/towns.json` + markets) with fuzzy matching (Jaro-Winkler ≥ 0.92) and state disambiguation. "anywhere" or no destination means `dest = anywhere`; state codes after "to" or "->" mean `dest = states`.
-- **Validation:** the origin resolves to known coordinates; `25 ≤ deadhead ≤ 300`; `1.0 ≤ minRpm ≤ 10`; equipment is known; destination states are valid.
-- **Confirmation:** always shown, because a wrong filter silently misses loads.
-- **Eval:** 50 phrasings (the generator's 3 templates plus hand-written messy ones) with expected specs. Score exact match per field, separately for the rules and LLM paths.
+- **Extractors find spans; one normalizer interprets them,** so rules, GLiNER2 and an LLM are compared on equal terms.
+- **Never guess silently.** A forced-choice model always answers (the spike classified "need loads out of dallas" as flatbed); an `unspecified` label plus a 0.6 confidence threshold turns that into a question.
+- **Defaults:** destination anywhere, deadhead 100 mi, no rate floor, destination radius 150 mi.
+- **Ambiguous place:** the same name in two or more states with population ≥ 50,000 each (Columbus OH/GA, Kansas City MO/KS).
+- **Every model call is a GenAI span** (`src/obs/llm.ts`): prompt, model, output, tokens, latency, errors → Langfuse, Jaeger, Prometheus.
+- **Not supported yet:** exclusions ("anywhere but NY") and multi-stop searches; the eval set keeps an example so the gap stays visible.
 
 ### 6.2 Planner
 

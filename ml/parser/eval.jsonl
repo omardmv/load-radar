@@ -1,0 +1,40 @@
+{"kind":"template","text":"need van out of Scottsdale going LA paying at least 2.62 a mile, 50 mile radius","equipment":"van","origin":"Scottsdale, AZ","dest":"states:LA","minRpm":2.62,"deadheadMi":50,"ask":true}
+{"kind":"template","text":"Phoenix, AZ to anywhere, van only, under 75 mi deadhead, min $3.47/mi","equipment":"van","origin":"Phoenix, AZ","dest":"anywhere","minRpm":3.47,"deadheadMi":75,"ask":false}
+{"kind":"template","text":"Phoenix, AZ to Milwaukee, WI (within 150 mi), flatbed only, under 100 mi deadhead, min $3.20/mi","equipment":"flatbed","origin":"Phoenix, AZ","dest":"point:Milwaukee, WI","minRpm":3.2,"deadheadMi":100,"ask":false}
+{"kind":"template","text":"Allentown, PA to anywhere, flatbed only, under 100 mi deadhead, min $3.52/mi","equipment":"flatbed","origin":"Allentown, PA","dest":"anywhere","minRpm":3.52,"deadheadMi":100,"ask":false}
+{"kind":"template","text":"Birmingham, AL to Miami, FL (within 200 mi), van only, under 150 mi deadhead, min $3.16/mi","equipment":"van","origin":"Birmingham, AL","dest":"point:Miami, FL","minRpm":3.16,"deadheadMi":150,"ask":false}
+{"kind":"template","text":"Birmingham, AL to CO, flatbed only, under 75 mi deadhead, min $4.16/mi","equipment":"flatbed","origin":"Birmingham, AL","dest":"states:CO","minRpm":4.16,"deadheadMi":75,"ask":false}
+{"kind":"template","text":"Omaha, NE to Charleston, SC (within 200 mi), reefer only, under 100 mi deadhead, min $3.32/mi","equipment":"reefer","origin":"Omaha, NE","dest":"point:Charleston, SC","minRpm":3.32,"deadheadMi":100,"ask":false}
+{"kind":"template","text":"need reefer out of Cincinnati going anywhere paying at least 3.58 a mile, 75 mile radius","equipment":"reefer","origin":"Cincinnati, OH","dest":"anywhere","minRpm":3.58,"deadheadMi":75,"ask":false}
+{"kind":"template","text":"VAN DALLAS TX -> GA/FL DH 100 RPM 3.05","equipment":"van","origin":"Dallas, TX","dest":"states:FL,GA","minRpm":3.05,"deadheadMi":100,"ask":false}
+{"kind":"template","text":"REEFER FRESNO CA -> ANYWHERE DH 150 RPM 3.7","equipment":"reefer","origin":"Fresno, CA","dest":"anywhere","minRpm":3.7,"deadheadMi":150,"ask":false}
+{"kind":"template","text":"need flatbed out of Memphis going TN/AR/MS, 100 mile radius","equipment":"flatbed","origin":"Memphis, TN","dest":"states:AR,MS,TN","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"template","text":"Nashville, TN to Chicago, IL (within 100 mi), reefer only, under 50 mi deadhead","equipment":"reefer","origin":"Nashville, TN","dest":"point:Chicago, IL","minRpm":null,"deadheadMi":50,"ask":false}
+{"kind":"template","text":"FLATBED HARRISBURG PA -> OH DH 75","equipment":"flatbed","origin":"Harrisburg, PA","dest":"states:OH","minRpm":null,"deadheadMi":75,"ask":false}
+{"kind":"template","text":"need van out of Stockton going anywhere, 150 mile radius","equipment":"van","origin":"Stockton, CA","dest":"anywhere","minRpm":null,"deadheadMi":150,"ask":false}
+{"kind":"template","text":"Laredo, TX to anywhere, van only, under 100 mi deadhead, min $2.90/mi","equipment":"van","origin":"Laredo, TX","dest":"anywhere","minRpm":2.9,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"FLATBED CHICAGO IL -> TX/OK DH 150 RPM 3.1","equipment":"flatbed","origin":"Chicago, IL","dest":"states:OK,TX","minRpm":3.1,"deadheadMi":150,"ask":false}
+{"kind":"messy","text":"reefer outta fresno 3.40+ no more than 100 deadhead","equipment":"reefer","origin":"Fresno, CA","dest":"anywhere","minRpm":3.4,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"got a dry van empty in joliet tmrw, anything to the southeast over $2.80","equipment":"van","origin":"Joliet, IL","dest":"states:AL,FL,GA,MS,NC,SC,TN","minRpm":2.8,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"stepdeck near savanah ga, want 4/mi or better","equipment":"flatbed","origin":"Savannah, GA","dest":"anywhere","minRpm":4,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"53 ft reefer, Laredo, going north, 75mi DH","equipment":"reefer","origin":"Laredo, TX","dest":"?","minRpm":null,"deadheadMi":75,"ask":true}
+{"kind":"messy","text":"need loads out of dallas","equipment":null,"origin":"Dallas, TX","dest":"anywhere","minRpm":null,"deadheadMi":100,"ask":true}
+{"kind":"messy","text":"Dry van in Atlanta GA headed to Charlotte NC, min 2.75/mi, 50 mi DH","equipment":"van","origin":"Atlanta, GA","dest":"point:Charlotte, NC","minRpm":2.75,"deadheadMi":50,"ask":false}
+{"kind":"messy","text":"reefer from Salinas CA to the northeast paying 3.90 a mile","equipment":"reefer","origin":"Salinas, CA","dest":"states:CT,MA,ME,NH,NJ,NY,PA,RI,VT","minRpm":3.9,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"Flatbed out of Columbus, need 3.25+ to anywhere","equipment":"flatbed","origin":"Columbus, OH","dest":"anywhere","minRpm":3.25,"deadheadMi":100,"ask":true}
+{"kind":"messy","text":"van empty in ontario ca any direction","equipment":"van","origin":"Ontario, CA","dest":"anywhere","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"REEFER MCALLEN TX -> IL/IN/OH RPM 3.4 DH 50","equipment":"reefer","origin":"McAllen, TX","dest":"states:IL,IN,OH","minRpm":3.4,"deadheadMi":50,"ask":false}
+{"kind":"messy","text":"need a flat bed outta Birmingham AL heading to Texas","equipment":"flatbed","origin":"Birmingham, AL","dest":"states:TX","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"van, Kansas City MO, going west coast, $3/mi","equipment":"van","origin":"Kansas City, MO","dest":"states:CA,OR,WA","minRpm":3,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"reefr out of fresno going anywhere","equipment":"reefer","origin":"Fresno, CA","dest":"anywhere","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"dryvan chicago to atlanta 2.50/mi","equipment":"van","origin":"Chicago, IL","dest":"point:Atlanta, GA","minRpm":2.5,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"looking for loads Indianapolis to Nashville van","equipment":"van","origin":"Indianapolis, IN","dest":"point:Nashville, TN","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"Flatbed near Denver CO, 100 mi radius, 3.50 per mile","equipment":"flatbed","origin":"Denver, CO","dest":"anywhere","minRpm":3.5,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"reefer Yakima WA to Seattle WA","equipment":"reefer","origin":"Yakima, WA","dest":"point:Seattle, WA","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"van out of Greenville SC anywhere but NY","equipment":"van","origin":"Greenville, SC","dest":"?","minRpm":null,"deadheadMi":100,"ask":true}
+{"kind":"messy","text":"Got a reefer in Lakeland FL, want Northeast, 3.25 minimum","equipment":"reefer","origin":"Lakeland, FL","dest":"states:CT,MA,ME,NH,NJ,NY,PA,RI,VT","minRpm":3.25,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"flatbed - Houston TX - DH 100 - RPM 2.95 - anywhere","equipment":"flatbed","origin":"Houston, TX","dest":"anywhere","minRpm":2.95,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"VAN ATLANTA","equipment":"van","origin":"Atlanta, GA","dest":"anywhere","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"LA to Phoenix reefer","equipment":"reefer","origin":"Los Angeles, CA","dest":"point:Phoenix, AZ","minRpm":null,"deadheadMi":100,"ask":false}
+{"kind":"messy","text":"flatbed in Gary IN going to Detroit 3.60/mi 150 dh","equipment":"flatbed","origin":"Gary, IN","dest":"point:Detroit, MI","minRpm":3.6,"deadheadMi":150,"ask":false}
+{"kind":"messy","text":"van chicago","equipment":"van","origin":"Chicago, IL","dest":"anywhere","minRpm":null,"deadheadMi":100,"ask":false}

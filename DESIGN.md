@@ -255,7 +255,8 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 
 **Day 2: AI/ML and measurement** (focus: AI/ML + backend/infra)
 - [ ] Same-load classifier trained on generator pairs: precision/recall, threshold choice, measured effect on misses and duplicates
-- [ ] Search parser (rules + LLM fallback): structured output, eval set (incl. messy phrasings from a local model), regression tests, LLM call log
+- [x] Search parser (rules + GLiNER2 / Qwen fallback), 40-example eval set, five contenders compared (ml/parser/RESULTS.md)
+- [x] LLM observability: OpenTelemetry GenAI spans → self-hosted Langfuse + Jaeger + Prometheus span metrics; eval scores attached to each call (OBSERVABILITY.md §8b)
 - [ ] Dashboard, scorer, load test runs
 - [ ] `SCALING.md`: section 5 rewritten with measured numbers
 - [x] README (plain-language guide)

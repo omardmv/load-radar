@@ -164,6 +164,23 @@ Structured JSON, one event per line, with fixed fields: `ts`, `level`, `event`, 
 
 Board passwords and tokens are never logged. A log-redaction test checks this.
 
+## 8b. LLM observability (built and verified)
+
+Requirement: for every LLM call, see the prompt sent, the model, the output, token usage and latency.
+
+```
+model call ──► one OpenTelemetry span, GenAI conventions (src/obs/llm.ts) ──► OTel Collector ─┬─► Langfuse  :3001  prompt, output, tokens, latency, eval scores
+                                                                                              ├─► Jaeger    :16686 the call inside its trace
+                                                                                              └─► Prometheus       llm_calls_total, llm_duration_* (span metrics)
+```
+
+- **Instrument once, route in config.** Every model call (GLiNER2, Qwen via Ollama, any future LLM) goes through `traceLlmCall()`, which records `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, request parameters (e.g. temperature), `gen_ai.usage.input_tokens` / `output_tokens`, the exact input (`langfuse.observation.input`: messages, schema) and the raw output (`langfuse.observation.output`), plus errors. Swapping Langfuse for LangSmith or Phoenix is a collector change, not a code change.
+- **Collector routing** (`ops/otel-collector.yaml`): all spans go to Jaeger. A second pipeline keeps only spans with `gen_ai.request.model` and sends them to Langfuse (OTLP/HTTP, header `x-langfuse-ingestion-version: 4` for real-time ingestion) and to the `spanmetrics` connector, which turns them into Prometheus metrics with no app code.
+- **Langfuse is self-hosted** (v4, in `docker-compose.yml`, secrets in `.env`). Calls are grouped by session (`eval-<run>-<contender>`, `cli`) and tagged with metadata (contender, example kind).
+- **Evals attach to calls:** `ml/parser/eval.ts` posts `eval_all_correct` and `eval_fields_correct` scores to the exact Langfuse observation that produced each answer, so a wrong answer is one click from the prompt and output that caused it.
+- **Verified** (2026-11-04): a Qwen call shows the full system and user messages, the raw JSON reply, 143 input / 50 output tokens, temperature 0 and 2.47 s; a GLiNER2 call shows the text and schema in, the spans with confidences out, 133 ms. The eval run produced 88 traced calls and 168 scores (0 failed); Prometheus counted 44 calls per model.
+- **Gotchas found:** span metrics are flushed about once a minute, so new calls appear in Prometheus with up to ~60 s delay; Prometheus labels the calling service `exported_job` / `service_name` (its own `job` label is the scrape job); Langfuse v4 removed the old `/api/public/traces` read endpoint (use `/api/public/v2/observations` or the UI).
+
 ## 9. Measuring performance: load-test protocol
 
 Each run follows the same steps, so results are comparable:
