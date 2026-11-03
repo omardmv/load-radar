@@ -178,7 +178,7 @@ services:
 
 volumes:
   app_node_modules:
-  gliner2_cache: { name: gliner2-cache }   # reuses the model already downloaded on the server
+  gliner2_cache: { name: gliner2-cache, external: true }   # created once on the server; holds the downloaded model
   ollama_models:
   langfuse_postgres_data:
   langfuse_clickhouse_data:
