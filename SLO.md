@@ -33,3 +33,16 @@ that moves the SLO back (overload handling, capacity), and it must show the impr
 
 Grafana → **Load Radar** dashboard → top row **SLOs**: each SLI over the last hour against its target, budget left,
 and burn rate over time.
+
+## Measured (2026-11-04, live world, 300 dispatchers, 20K loads/day)
+
+| SLO | 1× | 30× for 5 min |
+| --- | --- | --- |
+| Alerts within 60 s (99%) | 100% | **48.8%**, burn rate 52, `AlertLatencyBudgetFastBurn` fired |
+| Loads alerted, open 5+ min (99%) | 100% | **92.3%**, burn rate 7.7 |
+| Board requests not 429 (99%) | 100% | 100% |
+| Logins banned (0) | 0 | 0 |
+
+At normal speed every SLO holds; at 30× the single live process can't keep up and the speed SLO pages within minutes.
+The knee is somewhere between; finding it is the capacity step. An earlier run at 120× and 100K loads/day banned
+541 of 548 logins (SLO 3) because hundreds of requests per login were in flight when the first 429 came back.

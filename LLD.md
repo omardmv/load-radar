@@ -2,7 +2,7 @@
 
 [DESIGN.md](DESIGN.md) is the high-level design: the problem, the constraints, the parts and why they exist. This document is the low-level design: data types, state, APIs, algorithms, failure handling and tests, detailed enough to build from.
 
-Everything here targets the 2-day demo on one laptop (Node/TypeScript). Section 13 says what changes in production.
+Everything here targets the demo (Node/TypeScript) — originally time-boxed to 2 days on one laptop, now built out further and running continuously on a server (DEPLOY.md). Section 13 says what changes in production.
 
 ---
 
@@ -20,12 +20,13 @@ So the order is:
 
 | Process | What runs inside | Talks to |
 | --- | --- | --- |
-| `engine` | api, planner, scheduler, pollers, normalizer, dedup, matcher, alert queue, notifier, as modules connected by in-memory queues | boards-sim and telegram-sim over HTTP; SQLite file for searches and credentials; snapshot file |
+| `engine` | api, planner, scheduler, pollers, normalizer, dedup, matcher, alert queue, notifier, as modules connected by in-memory queues | boards-sim and telegram-sim over HTTP; searches and credentials from a flat file (batch) or passed in by the caller (live mode); no snapshot file yet (section 7 is the design, not built) |
 | `boards-sim` | replays `out/postings.ndjson` with budgets, 429s, bans, covered loads | — |
 | `telegram-sim` | enforces Telegram rate limits, logs deliveries | — |
 | `scorer` | offline, compares deliveries with the answer key | files |
+| `live` | one always-on process: `sim/world.ts` as a stream, boards-sim and telegram-sim in-process, `engine`, a rolling scorer, and the UI's HTTP + SSE API | nothing outside the container except the browser and the observability collector; saved searches persist in the `live_state` volume |
 
-Infrastructure (docker compose) is observability only: OpenTelemetry Collector, Prometheus, Grafana, Jaeger.
+Infrastructure in `docker compose` (DEPLOY.md): OpenTelemetry Collector, Tempo, Loki, Prometheus, Grafana (observability), GLiNER2 and Ollama (the search parser's models), self-hosted Langfuse, and the `live` service itself. All of it runs continuously on one Linux server; `app` is the only service that runs on demand.
 
 **Start with one thread, measure, then split.** Node runs JavaScript on one thread, which also makes every in-memory update atomic for free. If CPU profiling shows that one core is the limit (most likely JSON parsing of board responses), move pollers plus normalizer into `worker_threads`, partitioned by `hash(credentialId)`. Every stage has its partition key defined from day one (section 3), so splitting is a routing change, not a redesign.
 
@@ -103,14 +104,14 @@ Hot-path state is in memory. Each piece has exactly one owner, so there's no loc
 
 | State | Structure | Size at demo scale | Eviction | Owner, partition key | Survives restart via |
 | --- | --- | --- | --- | --- | --- |
-| Searches, credentials (source of truth) | SQLite tables | ~20K + ~8K rows | none | api; cold path | the SQLite file |
+| Searches, credentials (source of truth) | **Design: SQLite tables. Built: a flat file** — `searches.ndjson` (batch) or one JSON file per live-mode user (`live_state` volume) | ~20K + ~8K rows | none | api; cold path | the file itself; a real deployment would use a database (section 13) |
 | Plan entries + schedule | `Map<entryId, PlanEntry>` + **min-heap** on `nextAt` | ~10K | rebuilt on search change | scheduler, `credentialId` | rebuilt from searches (cursors from snapshot) |
 | Login budgets | `Map<credentialId, TokenBucket>` | ~8K | none | scheduler, `credentialId` | snapshot (else start conservatively at half budget) |
 | Dedup "seen" | `Map<board:id, contentHash>` in **hourly buckets** | ~300K | drop the oldest bucket after 72 h | dedup, block key | snapshot |
 | Dedup candidate blocks | `Map<blockKey, Entry[]>` (entries hold classifier features) | ~100K canonical loads | same hourly buckets | dedup, block key | snapshot |
 | Canonical loads | `Map<canonicalId, Load>` | ~100K | 72 h | dedup | snapshot |
 | Heat per cell | `Map<cell3|equip, EWMA>` | ~thousands | none | dedup → planner | snapshot |
-| Matcher index + specs | `Map<cell3|equip, Set<searchId>>` + `Map<searchId, SearchSpec>` | ~20K specs × 6–20 cells | rebuilt on search change | matcher, `cell3` | rebuilt from SQLite |
+| Matcher index + specs | `Map<cell3|equip, Set<searchId>>` + `Map<searchId, SearchSpec>` | ~20K specs × 6–20 cells | rebuilt on search change | matcher, `cell3` | rebuilt from the searches file/store on start, and by `engine.refreshSearches()` whenever live mode's searches change |
 | Alerted keys `(user, load)` | `Set<string>` in hourly buckets | ~100K | 72 h | matcher, `cell3` (then the alert stage, `userId`) | snapshot (this matters most: it prevents repeat alerts after a restart) |
 | Alert queue | binary heap on `postedAt` (pop min or max, section 6.8) | small | deadline drop | notifier | lost on crash (accepted, section 8) |
 | Telegram buckets | token buckets per bot and per chat | ~users | idle 1 h | notifier, `chatId` | not needed |
@@ -179,8 +180,9 @@ confirm:         "Reefer · within 100 mi of Fresno, CA → anywhere · ≥ $3.4
 - **Never guess silently.** A forced-choice model always answers (the spike classified "need loads out of dallas" as flatbed); an `unspecified` label plus a 0.6 confidence threshold turns that into a question.
 - **Defaults:** destination anywhere, deadhead 100 mi, no rate floor, destination radius 150 mi.
 - **Ambiguous place:** the same name in two or more states with population ≥ 50,000 each (Columbus OH/GA, Kansas City MO/KS).
-- **Every model call is a GenAI span** (`src/obs/llm.ts`): prompt, model, output, tokens, latency, errors → Langfuse, Jaeger, Prometheus.
+- **Every model call is a GenAI span** (`src/obs/llm.ts`): prompt, model, output, tokens, latency, errors → Langfuse, Tempo (via the collector's default trace pipeline), Prometheus (span metrics).
 - **Not supported yet:** exclusions ("anywhere but NY") and multi-stop searches; the eval set keeps an example so the gap stays visible.
+- **Known bug:** a lone ambiguous place name can get picked up as both origin and destination. "loads out of springfield tmrw" has no equipment, so hybrid mode calls the model even though the rules already found `originText = "springfield"`; the model is asked for a `destination` entity too (`src/parse/gliner.ts`'s `SCHEMA`) and can return the same place for it. Because `parseSearch` (`src/parse/parse.ts`) only fills fields the rules left empty, that guess becomes `destText`, and the dispatcher is asked "Which Springfield?" twice: once for origin, once for destination. Not fixed yet.
 
 ### 6.2 Planner
 
@@ -352,11 +354,44 @@ Implementation: two heaps on `postedAt` (min and max) over the same items, or on
 - HTTP concurrency to Telegram: ~10 sockets per bot (30 msg/s × ~0.2 s ≈ 6 in flight).
 - The `deliver` span records `postedAt → accepted by Telegram`. That is the headline latency.
 
+### 6.10 Live mode (`live/`)
+
+Live mode runs the whole pipeline above as one always-on process instead of a one-shot batch job, plus a UI. DESIGN.md §3.0 has the overall diagram; this section is the detail the other components above don't cover.
+
+**`live/stream.ts`** — a world that never stops. It wraps `sim/world.ts`'s `createWorld(seed)` in a real-time loop: `tick()` samples a Poisson count of new loads for however much simulated time just passed (rate = `loadsPerDay × HOURLY[centralHour(now)] / HOURLY_SUM`, the same hourly curve the batch generator uses), creates them, and schedules every posting each one will ever get (`world.postingsFor`: first post, refreshes, reposts, cross-board copies, a co-broker) on a min-heap keyed by `posted_at`. Due postings are released into the same `BoardData` shape `boards-sim` serves from, indexed by `geohash(origin, 3)`, so `src/engine.ts` can't tell live mode's boards from the batch simulator's. `prune()` drops postings older than `KEEP_MS` (6 simulated hours) so memory doesn't grow forever. `burst(city, equip, count, windowMs)` adds many loads out of one market inside a short window — the UI's burst button.
+
+**`live/score.ts`** — the live answer key, built incrementally instead of read from a finished `truth.ndjson`. `onLoad(t)` runs the same `specMatches` filters as the batch scorer (`src/match/filters.ts`) against every search indexed near the load's geohash cell, and records an `Expect` for each user whose searches should hear about it — skipping searches created after the load was posted, so a brand-new search doesn't retroactively expect old loads. `onDelivery(d, loadOf)` checks each delivery against its expectation: a match removes it and records latency; a delivery that arrives after its expectation was already swept into `missed` is reclassified as `late`; one that was never expected and whose user had an active search before the load was posted counts as `backfill` (the load was already on the board when the search was saved, so matching it on save is correct, not a false alert); anything else is `unexpected`; a repeat delivery to the same user for the same load counts as a `duplicate` and is otherwise ignored. `sweep(now)`, run every 5 s, declares anything still pending after `SETTLE_MS` (15 simulated minutes — the engine's own 10-minute alert deadline plus 5 minutes of slack) as `missed`, additionally flagging `missedOpen5Min` when the load stayed coverable for at least 5 minutes (so it really should have been caught, not just a load that vanished almost immediately). `rebuild()` re-indexes searches by cell whenever they change and drops pending expectations for searches that no longer exist, counting those as `cancelled` rather than `missed`.
+
+**`live/server.ts` API** (every path under `/api/`, alongside the built `ui/` served as static files):
+
+| Method | Path | Does |
+| --- | --- | --- |
+| `GET` | `/metrics` | Prometheus scrapes this (job `load-radar-live`, `live:8080`): the SLO 2 answer-key counters (`answer_key_settled_total`, `answer_key_other_total`, `answer_key_pending`), on their own registry, separate from the engine's own `/metrics` on port 9464 |
+| `GET` | `/api/state` | one-shot snapshot: stats, your saved searches, recent postings and alerts |
+| `GET` | `/api/events` | Server-Sent Events: a `stats` event every second, a `postings` event every 250 ms (last 12), an `alert` event as each one is delivered |
+| `POST` | `/api/parse` | runs the search parser (hybrid: rules, then GLiNER2 for whatever's still missing) and returns the parsed fields, the dispatcher-facing questions, and a `requestTraceId` so the UI can link to the trace |
+| `POST` | `/api/searches` | parses the text, validates it (needs at least an origin and an equipment type), saves it, persists it to the `live_state` volume, and calls `engine.refreshSearches()` |
+| `DELETE` | `/api/searches/:id` | removes the search, persists, and calls `engine.refreshSearches()` |
+| `POST` | `/api/speed` | sets the clock's speed, clamped to 1–120× |
+| `POST` | `/api/rate` | sets `loadsPerDay`, clamped to 1,000–500,000 |
+| `POST` | `/api/burst` | triggers `stream.burst`, clamped to 5,000 loads |
+
+Every path except `/api/events` and `/api/state` runs inside one OpenTelemetry trace (`SpanKind.SERVER`); path parameters like `/api/searches/Y12` are normalized to `/api/searches/:id` in the span name so traces group by route, not by every individual search id.
+
+**`engine.refreshSearches()` and alert cancellation.** Called after any change to live mode's users or searches (a save or a delete). It rebuilds the matcher (`buildMatcher`) and every login's polling plan from the current `users` array — the same rebuild the batch engine does every 10 minutes on a timer, just triggered immediately instead. It then removes any alert still queued or held whose searches are *all* gone (`alertQueue.removeWhere(gone) + notifier.removeWhere(gone)`; one alert can serve several searches, so it's kept if even one is still active). `live/score.ts`'s own `rebuild()` does the matching cleanup on the answer-key side, so deleting a search doesn't just stop new alerts for it — it also stops counting alerts already in flight for it as upcoming misses.
+
+**Adjustable clock** (`src/shared/clock.ts`, `createAdjustableClock`). The batch engine's `createSimClock` fixes `speed` once at start; live mode needs the UI's speed slider to change it mid-run without `now()` jumping. `createAdjustableClock` re-anchors `simAnchor` and `realAnchor` to the current `now()` every time `setSpeed()` is called, so time stays continuous across the change. Its `sleep()` also caps the real-time wait at 1 s regardless of the requested simulated duration, so a sleeping stage notices a speed change within a second instead of oversleeping at the old speed.
+
+**Logger** (`src/obs/log.ts`). One function, `log(level, event, attrs)`, used everywhere instead of a logging framework. Each call does two things: prints one JSON line to stdout (`ts`, `level`, `event`, the attrs, and `trace_id`/`span_id` if a span is active on the current context), and — when an OTLP endpoint is configured — emits the same record through an OpenTelemetry `LoggerProvider`/`BatchLogRecordProcessor` to the collector, which forwards it to Loki. Carrying the trace id on every line is what lets Grafana jump from a log line straight to its trace (OBSERVABILITY.md's "slow alert → trace → logs" walkthrough). Events emitted today: `live.started`, `search.parsed`, `search.saved`, `search.removed` (with `alerts_cancelled`), `alert.sent`, `control.speed` / `control.volume` / `control.burst`, `parse.model_unavailable`, `api.error`.
+
 ## 7. Snapshots and recovery
 
+**Design, not built yet.** The current engine keeps all hot-path state (section 3) only in memory, with no snapshot file, so a crash loses everything since the process started, not just a few seconds. What's described below is the fix:
+
 - Every 5 s, write the snapshot-able state from section 3 (alerted keys, dedup buckets, canonical loads, cursors, budgets, heat) to `state/snapshot-<ts>.bin`, then atomically rename it to `state/snapshot.bin`. Hourly buckets mean only changed buckets need writing.
-- On start: load SQLite (searches, credentials), rebuild plans and the matcher index, load the snapshot, then begin polling. Budgets missing from the snapshot start at half budget to be safe with the boards.
+- On start: load searches and credentials (from their store, section 3), rebuild plans and the matcher index, load the snapshot, then begin polling. Budgets missing from the snapshot start at half budget to be safe with the boards.
 - **Accepted loss on crash:** anything since the last snapshot (≤ 5 s) and the in-flight alert heap. Effects: a few missed alerts (loads seen but not yet delivered) and possibly duplicate alerts (deliveries after the last snapshot). The scorer measures both in a kill-and-restart test. If that loss is too high, it's a trigger for section 12.
+- Today, live mode gets a weaker version of this for free: saved searches are the only state that matters across a restart, and those already live in the `live_state` volume (`live/server.ts`'s `you.json`), not in memory. Everything else (dedup state, alerted keys, in-flight alerts) is rebuilt from nothing on restart, which is fine for a demo but would miss and duplicate alerts right after a restart in production.
 
 ## 8. Guarantees and backpressure
 
@@ -408,7 +443,7 @@ One trace per posting; trace context travels with each item through the in-memor
 Labels stay low-cardinality: **never label by user or credential**, which would mean millions of series at 1000x. Per-credential detail goes into logs and traces.
 
 ```
-post_to_alert_seconds{lane_heat}            histogram   SLO: p95 < 20 s (hot), < 120 s (cold)
+post_to_alert_seconds{lane_heat}            histogram   SLO (built, see SLO.md): 99% of alerts within 60 s
 upstream_requests_total{board,status}       counter
 login_paused_total{board}, login_banned_total{board}   counter   SLO: banned = 0
 poll_freshness_seconds{lane_heat}           histogram   age of the newest data per entry
@@ -431,6 +466,8 @@ One record per call: `{ts, model, prompt, output, input_tokens, output_tokens, l
 
 ### 10.4 Dashboard (one Grafana board)
 Row 1, customer view: post-to-alert p50/p95/p99, missed matches and duplicates (from the scorer), bans. Row 2, sources: requests by status per board, pool wait, paused logins, freshness. Row 3, engine: queue depth and wait per stage, event-loop lag, heap and GC, dedup results, fan-out. Row 4, delivery: alert queue depth and age, queue mode, stale drops, Telegram 429s.
+
+**Built, and smaller than the above:** `ops/grafana/dashboards/load-radar.json`, provisioned as code and set as the server's home dashboard — an SLO row (SLO.md), then throughput, latency, health, model calls, and a table of recent requests linked to their traces and logs. OBSERVABILITY.md §10 has the full panel list and the parts of this row-by-row plan that aren't built yet.
 
 ## 11. Capacity: what breaks first on one machine
 
@@ -498,17 +535,30 @@ Trade-off: a regression is noticed when a scored run or an eval gets worse, not 
 
 ## 16. Repo layout
 
+This is the actual current layout; `SCALING.md` is the one piece from the original plan not written yet:
+
 ```
 load-radar/
-  DESIGN.md  LLD.md  SCALING.md (after load tests)
-  docker-compose.yml          (observability only)
-  sim/            gen.ts, validate.ts, data/, ASSUMPTIONS.md      (done)
-  sims/           boards-sim.ts, telegram-sim.ts
+  README.md  DESIGN.md  LLD.md  OBSERVABILITY.md  DEPLOY.md  SCALING.md (after load tests, not written)
+  docker-compose.yml          live mode, models (GLiNER2, Ollama), observability, Langfuse; app runs on demand
+  ops/            server/deploy.sh, macos/*.plist (SSH tunnel), otel-collector.yaml, tempo.yaml, prometheus.yml, grafana/
+  sim/            world.ts (the calibrated model), gen.ts (batch wrapper), validate.ts, data/, ASSUMPTIONS.md
+  sims/           boards-sim.ts, telegram-sim.ts, cover.ts
   src/
-    shared/       types.ts, queue.ts (bounded), heap.ts, buckets.ts (hourly eviction), snapshot.ts, store.ts (SQLite), otel.ts, geo.ts, gazetteer.ts
-    api/  planner/  scheduler/  poller/  normalizer/ (adapters/)  dedup/ (classifier/)  matcher/  alerts/  notifier/
-    engine.ts     wires the stages together
-  scorer/         score.ts
-  loadtest/       runs.md, scripts
-  dashboards/     grafana.json
+    shared/       types.ts, queue.ts (bounded), heap.ts, expiring.ts (hourly eviction), clock.ts, geo.ts
+    normalize/    gazetteer.ts, normalize.ts
+    dedup/        dedup.ts — rule-based stand-in; no trained classifier yet
+    match/        matcher.ts, filters.ts
+    plan/         heat.ts, planner.ts
+    schedule/     scheduler.ts
+    poll/         poller.ts
+    alerts/       alert-queue.ts, notifier.ts
+    parse/        the search parser: rules, GLiNER2/Qwen extractors, normalizer (section 6.1)
+    obs/          obs.ts (engine metrics + sampled traces), llm.ts (GenAI spans), log.ts (structured logs)
+    engine.ts     wires the stages together; used by both batch mode and live mode
+  live/           server.ts (API + UI host), stream.ts, score.ts, Dockerfile
+  ui/             the React + shadcn/ui frontend (Vite build, served by live/server.ts)
+  scorer/         score.ts (batch)
+  bench/overhead/ the observability-cost benchmark, RESULTS.md
+  ml/parser/      GLiNER2 service, eval harness, RESULTS.md
 ```

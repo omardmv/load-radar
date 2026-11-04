@@ -49,4 +49,3 @@ The value for each row is from seed 1, 100K loads (287,905 postings). Seeds 2 an
 
 - **Same-state share is 32%, and no trustworthy reference exists.** The sample board shows 3.3%, but it's small and biased. Census freight surveys say most truck *tons* stay in-state, but that's mostly local hauls under 50 miles, which don't appear on load boards. Hitting DAT's short flatbed trips puts many loads inside big states (Texas, California), so `validate.ts` reports this number without failing on it.
 - Lane-level volumes aren't checked against real lane rankings. DAT publishes regional rankings, not city lanes.
-- The board simulator still has to add board behavior: loads being covered and removed, rate limits, 429s and bans.

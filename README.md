@@ -34,7 +34,7 @@ This is an interview project for Numeo, which builds AI agents for trucking. The
 The project goes deep on two areas: **backend/infrastructure** (scaling, measurement, observability) and **AI/ML**, where the system genuinely needs it:
 - **ML: same-load classifier** for dedup. The simple rule wrongly merged 12% of loads; the classifier is trained on the generator's answer key, and its effect on misses and duplicates is measured end to end.
 - **Search parser: rules + a small model.** Rules handle dispatcher shorthand; a small local model (GLiNER2, or Qwen via Ollama) fills what the rules miss; one normalizer resolves places, regions and typos and asks instead of guessing. Five contenders compared on one eval set: [ml/parser/RESULTS.md](ml/parser/RESULTS.md).
-- **LLM observability:** every model call is an OpenTelemetry GenAI span, routed to self-hosted **Langfuse** (prompt, output, tokens, latency, eval scores), Jaeger and Prometheus. See OBSERVABILITY.md §8b.
+- **LLM observability:** every model call is an OpenTelemetry GenAI span, routed to self-hosted **Langfuse** (prompt, output, tokens, latency, eval scores), Grafana (Tempo for the trace, Loki for the logs) and Prometheus. See OBSERVABILITY.md §8b.
 
 No frontend: the user-facing side is shown through the simulators, the scorer and the dashboards.
 
@@ -151,7 +151,11 @@ Rough stages. The load tests replace these guesses with measurements.
 | Engine core (normalize, dedup, match, alert) | ✅ Built for the benchmark (`bench/overhead/core.ts`); dedup uses a simple rule, not the trained model yet |
 | Observability overhead test | ✅ Done: +1.0% with our setup |
 | Board and Telegram simulators, scheduler, pollers, full engine, scorer, end-to-end run | ✅ Built (Day 1); first scored run above. No automated tests by choice: checked by scored runs (LLD §15) |
-| Trained dedup classifier, LLM search parser, dashboards, load tests | ⏳ Day 2 |
+| Search parser (rules + GLiNER2, Qwen fallback) | ✅ Built; five contenders compared on one eval set ([ml/parser/RESULTS.md](ml/parser/RESULTS.md)); one known bug below |
+| Observability (Tempo, Loki, Langfuse, Prometheus, a provisioned Grafana dashboard, SLOs with burn-rate alerts) | ✅ Built and running on the server |
+| Live mode: always-on world, UI, continuous deploy | ✅ Built and running on the server (below) |
+| Trained dedup classifier | ⏳ Not built: dedup still uses the rule-based stand-in |
+| Formal load-test harness (step-load runs, DESIGN.md §7) | ⏳ Not built as a separate suite; pushing live mode's speed and volume controls found a real bug (below) |
 
 ## Live mode (try it yourself)
 
@@ -160,16 +164,21 @@ Open **http://localhost:8080** (served by the server, through the tunnel). The `
 - **New data all the time.** Loads arrive as they would on a real board ([sim/world.ts](sim/world.ts), the same calibrated model the batch generator uses), following the US Central day: busy 7–12, quiet overnight. Each load spreads into postings over its life: refreshes, reposts with new ids, copies on other boards, a co-broker. 300 synthetic dispatchers with ~1,100 saved searches poll the boards alongside you.
 - **You are a dispatcher.** Type a search in plain English; the parser (rules + GLiNER2, every call traced in Langfuse) shows what it understood and asks when something is unclear. Save it, and alerts arrive the way the Telegram bot would send them.
 - **Scored live.** The answer key is built as each load is born, so the page shows misses, duplicates and post-to-alert latency for everyone and for you, in real time.
-- **Push it.** Speed slider (1–120×), freight volume (10K–100K loads/day), and burst buttons (500 loads out of one market at once) to watch queues, 429s and latency react; Grafana shows the same from the engine's metrics.
+- **Push it.** Speed slider (1–120×), freight volume (10K–100K loads/day), and burst buttons (500 loads out of one market at once) to watch queues, 429s and latency react; Grafana shows the same from the engine's metrics. Above ~30× one Node process can't keep up and the UI says so.
+- **Removing a search cancels it.** Deleting a saved search also cancels its queued and held alerts (`engine.refreshSearches`), so you don't keep getting alerts for a search you just removed.
+
+**Known issues found this way:**
+- **Parser:** "loads out of springfield tmrw" resolves Springfield as the origin, but because the equipment is still missing the model runs too and is asked for a destination; it echoes the same place back, so the dispatcher is asked "Which Springfield?" twice, once for origin and once for destination, instead of once. Not fixed yet.
+- **Scheduler under heavy load:** at 120× speed and 100K loads/day, a run banned 541 of 548 logins and missed 86.6% of loads. The scheduler fires each login's next poll on a timer and doesn't check whether that login's previous poll is still in flight, so at high speed hundreds of requests for the same login can be queued before the first response (and its 429) comes back. The fix is a per-login cap of one poll in flight; not built yet.
 
 Code: [live/](live/) (stream, live scorer, API) and [ui/](ui/) (React + shadcn/ui). UI development: `cd ui && npm run dev` (proxies `/api` to localhost:8080).
 
 ## Run it
 
-Everything (engine, simulators, models, observability) runs in Docker on the Linux server; see [DEPLOY.md](DEPLOY.md). On the server, from `~/load-radar`:
+Everything (live mode, models, observability, and the engine/simulators/eval on demand) runs in Docker Compose on one Linux server; see [DEPLOY.md](DEPLOY.md). On the server, from `~/load-radar`:
 
 ```bash
-docker compose up -d                                         # models + observability, restart on reboot
+docker compose up -d                                         # live mode + models + observability, restart on reboot
 alias app='docker compose run --rm --use-aliases app'        # Node 26 container on the same network
 app node sim/gen.ts --loads 8000 --users 300 --hours 2 --out out-small
 app node scripts/run.ts --data out-small --speed 30 --minutes 3 --otlp http://otel-collector:4318/v1/traces
@@ -177,7 +186,7 @@ app node scripts/run.ts --data out-small --speed 30 --minutes 3 --otlp http://ot
 
 The last line printed is `RUN_RESULT {...}`: alerts expected vs delivered, misses, duplicates, latency (simulated seconds), board stats (429s, bans) and engine counters. The same JSON is written to `out-small/run/result.json`. Prometheus scrapes the engine at `app:9464` while it runs.
 
-From the Mac, the UIs open on localhost through the SSH tunnel: Grafana :3000, Langfuse :3001 (login: `LANGFUSE_INIT_USER_*` in `.env`), Prometheus :9090, Jaeger :16686.
+From the Mac, the UIs open on localhost through the SSH tunnel (`ops/macos/com.loadradar.tunnel.plist`): live UI :8080, Grafana :3000 (traces in Tempo, logs in Loki, metrics in Prometheus, all linked), Langfuse :3001 (login: `LANGFUSE_INIT_USER_*` in `.env`), Prometheus :9090.
 
 ### Search parser and LLM observability
 
@@ -187,7 +196,7 @@ app node ml/parser/eval.ts --gliner http://gliner2:7100 --ollama http://ollama:1
   --otlp http://otel-collector:4318/v1/traces --langfuse http://langfuse-web:3000
 ```
 
-Each model call then appears in Langfuse with the exact prompt, the raw output, tokens and latency, and eval runs attach a correctness score to each call. Qwen runs on the server's CPU: about 16 s per call (vs ~0.5 s on the Mac's GPU), so the Qwen contenders make a full eval take ~15 minutes. The rules + GLiNER2 hybrid stays at ~50 ms.
+Each model call then appears in Langfuse with the exact prompt, the raw output, tokens and latency, and eval runs attach a correctness score to each call. Qwen runs on the server's CPU: about 16 s per call (vs ~0.5 s on the Mac), so the Qwen contenders make a full eval take ~15 minutes. The rules + GLiNER2 hybrid stays at ~50 ms.
 
 ### First end-to-end result
 
@@ -212,5 +221,7 @@ Small dataset (3,000 loads, 100 customers, 172 logins), 90 simulated minutes at 
 | [DESIGN.md](DESIGN.md) | High-level design: problem, constraints, architecture, decisions and trade-offs, what breaks at 1000x |
 | [LLD.md](LLD.md) | Low-level design: data types, in-memory state, APIs, algorithms, failure handling, tests |
 | [OBSERVABILITY.md](OBSERVABILITY.md) | What we measure, dashboards, alerts, runbooks, load-test method |
+| [SLO.md](SLO.md) | The three service-level objectives, their error budgets, and the burn-rate alerts that watch them |
+| [DEPLOY.md](DEPLOY.md) | How the server, continuous deploy and the Mac's SSH tunnel are set up |
 | [bench/overhead/RESULTS.md](bench/overhead/RESULTS.md) | The overhead test: method, numbers, lessons |
 | [sim/ASSUMPTIONS.md](sim/ASSUMPTIONS.md) | Every number in the fake data, with its source |

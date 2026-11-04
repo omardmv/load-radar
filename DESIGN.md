@@ -2,7 +2,7 @@
 
 A saved-search alert engine for truck dispatchers, built and load-tested on simulated load boards, to answer one question with measurements: **what breaks first at 1000x, and how do you fix it?**
 
-Status: design, 2026-11-03. Data generator done (`sim/`). Time box: 2 days on one laptop.
+Status: updated 2026-11-04. Originally time-boxed to 2 days on one laptop; most of it is now built and running continuously on a server (README.md §8 has the exact built-vs-designed breakdown).
 
 This is the **high-level design**: the problem, the constraints, the parts and why each exists. The **low-level design** (types, in-memory state, APIs, algorithms, failure handling, tests) is in [LLD.md](LLD.md).
 
@@ -85,6 +85,39 @@ flowchart LR
   DP -.-> OBS
   CP -.-> OBS
 ```
+
+### 3.0 Live mode: the same pipeline, running continuously
+
+The `live` service (`live/server.ts`) wires the whole diagram above into one always-on Node process with a UI, instead of a batch run against a fixed dataset. It's what runs on the server and what a visitor sees at the live UI:
+
+```
+sim/world.ts (createWorld(seed)) ──► live/stream.ts (Poisson arrivals, US Central hour-of-day)
+       │ makeLoad / postingsFor: each real load becomes several postings over time
+       ▼
+ boards-sim + telegram-sim (in-process, same clock) ◀── src/engine.ts polls, normalizes, dedups, matches, alerts
+       │                                                        │
+       │                                               live/score.ts: rolling answer key, built as each load is born
+       ▼                                                        │
+ live/server.ts HTTP + SSE API  ───────────────────────────────►│
+   /api/state /api/events (snapshot + live stream)              │
+   /api/parse /api/searches (search parser, cold path)          │
+   /api/speed /api/rate /api/burst (push the clock and volume)  │
+       │                                                        ▼
+       └────────────────────────────────────────────►  ui/ (React + shadcn/ui, built by Vite, served as static files)
+
+Every /api/* request except /api/events and /api/state is one OpenTelemetry trace (SpanKind.SERVER), with
+child spans for the search parser's model calls. src/obs/log.ts writes one JSON log line per event, to
+stdout and over OTLP, carrying the active trace_id. Both go to the same collector as the batch engine:
+
+ live/server.ts ──traces──► otel-collector :4318 ──┬─► tempo (every trace; Grafana Explore / Traces Drilldown)
+                                                     ├─► loki (logs, linked to tempo by trace_id)     } all in
+                                                     ├─► langfuse-web :3001 (GenAI spans only)         Grafana :3000
+                                                     └─► spanmetrics ──► prometheus :9090 (llm_calls_total, llm_duration_*)
+```
+
+Speed is adjustable while running (`src/shared/clock.ts`, `createAdjustableClock`): the UI's speed slider re-anchors sim time to real time on every change instead of restarting the process. Saving or removing a search calls `engine.refreshSearches()`, which rebuilds the matcher index and polling plans and cancels any alert still queued or held for a search that's gone (LLD §6.10).
+
+`live/server.ts` also serves its own `/metrics` (separate from the engine's own `:9464`), exporting the live answer key as `answer_key_settled_total` / `answer_key_other_total`: that's what the SLOs in [SLO.md](SLO.md) and the dashboard's SLO row are built on.
 
 ### 3.1 Control plane: creating a search (rare, accuracy matters)
 
@@ -172,6 +205,10 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 | 14 | **Synthetic data calibrated to real numbers**, with an answer key | Boards forbid scraping; the answer key makes misses and latency measurable exactly | Scraped samples | Results depend on simulator assumptions (`sim/ASSUMPTIONS.md`, `sim/validate.ts`) |
 | 15 | **Benchmarks on a pinned Linux core**, noise floor reported | Laptop noise (±10%) hides 5% effects; pinned: ±1.4% | Laptop runs | Needs a Linux machine (the `dev` server) |
 | 16 | **TypeScript on Node** | Numeo's stack | Go or Rust | One JS thread per process: worker threads and more processes needed sooner |
+| 17 | **Live mode as one process** (`live/server.ts`): world, board/Telegram simulators, engine and UI together, on one adjustable clock | Simplest thing that gives a visitor a running demo; the live scorer needs the same clock as everything it's scoring | Separate processes per simulator, like batch mode | One process to restart; the same single-core ceiling as the engine itself (found at 120×/100K loads/day, README "Known issues") |
+| 18 | **Tempo + Loki, not Jaeger**, for traces and logs | Both are Grafana's own backends: one UI for metrics, traces and logs, linked (log → trace by `trace_id`, trace → logs, latency exemplars → trace). Tempo's `local-blocks` processor gives TraceQL rate/error/duration metrics with no separate query engine | Jaeger (own UI, no built-in log link); a hosted trace backend | One more self-hosted service (Loki) to run and keep healthy |
+| 19 | **Pull-based continuous deploy** (cron runs `ops/server/deploy.sh` every minute: fetch, fast-forward, rebuild) over a self-hosted CI runner on this public repo | A self-hosted GitHub Actions runner on a public repo executes any PR's code; cron only ever reads `main` from GitHub, and the server accepts no inbound connections at all | Self-hosted Actions runner; a webhook-triggered deploy (needs an open port) | Up to a minute of deploy lag; no rollback button, just `git revert` and push |
+| 20 | **Adjustable sim clock** (`createAdjustableClock`): speed can change mid-run, re-anchoring sim time to real time | The live UI's speed slider must not make `now()` jump when the user drags it | A fixed-speed clock, restarted to change speed (what batch mode uses) | A little extra bookkeeping (re-anchor on every speed change) instead of a single multiply |
 
 ## 5. What breaks first at 1000x (hypotheses the load test will confirm or correct)
 
@@ -196,6 +233,8 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 
 No central store sits on the hot path at any stage; LLD section 12 lists the measured triggers for adding one.
 
+**Measured, not just hypothesized, before 10x:** pushing live mode (one process) to 120× speed and 100K loads/day banned 541 of 548 logins and missed 86.6% of loads. Cause: the scheduler fires each login's next poll on a timer without checking whether that login's previous poll already got a response, so at high speed hundreds of requests for one login can be in flight before the first 429 comes back. The fix is a per-login cap of one poll in flight; not built yet (README "Known issues").
+
 ## 6. Observability
 
 The full plan (latency breakdown, RED/USE metrics, sampling, dashboards, burn-rate alerts, runbooks, load-test protocol) is in [OBSERVABILITY.md](OBSERVABILITY.md).
@@ -204,7 +243,7 @@ The full plan (latency breakdown, RED/USE metrics, sampling, dashboards, burn-ra
 
 Summary:
 
-**Traces** (OpenTelemetry → Jaeger): 1% of postings, plus every slow or failed one, each as **one span** carrying the timing of every stage and the board's `posted_at`, so the 6 seconds above can be split by stage.
+**Traces** (OpenTelemetry → Tempo, read from Grafana): 1% of postings, plus every slow or failed one, each as **one span** carrying the timing of every stage and the board's `posted_at`, so the 6 seconds above can be split by stage.
 
 **Metrics** (Prometheus → Grafana, one dashboard):
 
@@ -221,15 +260,15 @@ Summary:
 
 **Ground truth.** The simulator knows when each load was really posted and which searches should have matched. That lets the scorer measure **latency, misses and duplicates exactly**, which a production system can only estimate.
 
-**SLOs for the demo:**
+**SLOs: built, with real error budgets and burn-rate alerts.** [SLO.md](SLO.md) is now the source of truth:
 
 | SLI | Target |
 | --- | --- |
-| Post-to-alert p95 | < 20 s on busy lanes, < 120 s on quiet lanes |
-| Missed matches | < 0.5% |
-| Duplicate alerts | < 1% |
-| Bans / 429 rate | 0 / < 1% of requests |
-| Parser: valid on first try | > 95% on a 50-example eval set |
+| Alerts are fast | 99% of alerts reach Telegram within 60 s (simulated) of the load being posted |
+| Alerts are complete | 99% of matching loads that stay on the board 5+ minutes get an alert |
+| Boards stay friendly | 0 banned logins; under 1% of board requests answered 429 |
+
+Each has a rolling 1-hour error budget and multiwindow burn-rate alerts (`ops/prometheus-rules.yml`), visible on the dashboard's **SLOs** row and at `/alerts` in Prometheus. Parser accuracy (valid on first try) is tracked separately by the eval set (`ml/parser/RESULTS.md`), not yet as a burn-rate SLO.
 
 ## 7. Test setup
 
@@ -237,9 +276,9 @@ Summary:
 | --- | --- | --- |
 | **Data generator** (`sim/gen.ts`) | Done | Realistic loads, postings in 4 board formats, users and searches, plus an answer key. Calibrated to DAT 2026 data and a public board sample; `sim/validate.ts` checks 16 metrics |
 | **Observability overhead bench** (`bench/overhead/`) | Done | Engine core + 9 observability modes, run pinned on Linux; result +1.0% for the chosen setup |
-| **Board simulator** | To do | Serves postings over HTTP per login, enforces budgets (429s, bans), removes loads once they're taken |
-| **Scorer** | To do | Compares delivered alerts to the answer key: latency, misses, duplicates, stale alerts |
-| **Load test runs** | To do | Baseline → 10x customers → hot-lane burst (`--burst`) → one board slow and returning 429s → LLM down |
+| **Board simulator** (`sims/boards-sim.ts`) | Done | Serves postings over HTTP per login, enforces budgets (429s, bans), removes loads once they're taken |
+| **Scorer** (`scorer/score.ts`, and `live/score.ts` for the always-on version) | Done | Compares delivered alerts to the answer key: latency, misses, duplicates, stale alerts |
+| **Load test runs** | Informal, no dedicated suite | Live mode's speed slider, freight-volume buttons and burst button stand in for a step-load harness; pushing them to 120×/100K loads/day found the scheduler bug in section 5 (README "Known issues"). The staged `users ×1, 2, 4, 8…` runs below aren't built as a separate script |
 
 Each run records the first SLO to fail and what saturated at that moment: HTTP pool wait, CPU and event-loop lag, heap and GC, queue age, or token buckets.
 
@@ -248,23 +287,28 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 **Day 1: the pipeline runs end to end**
 - [x] Data generator + validation
 - [x] Engine core for the benchmark (normalize, dedup with a simple rule, matcher, alerts) + observability overhead test
-- [x] `docker compose`: OTel Collector, Prometheus, Grafana, Jaeger (observability only; no Redis); stack not yet started on this machine
+- [x] `docker compose`: OTel Collector, Tempo, Loki, Prometheus, Grafana, GLiNER2, Ollama, Langfuse (self-hosted); runs continuously on the dev server, deployed by cron (DEPLOY.md), not just started locally
 - [x] Board simulator (budgets, 429s, bans, covered loads) and Telegram simulator
 - [x] Scheduler + pollers, normalizer, dedup (rule; classifier on Day 2), matcher, alert queue, notifier
 - [x] Observability on every stage (lite metrics, own 1% sampling, 1 span per posting) and an end-to-end scored run (README "First end-to-end result")
 
 **Day 2: AI/ML and measurement** (focus: AI/ML + backend/infra)
 - [ ] Same-load classifier trained on generator pairs: precision/recall, threshold choice, measured effect on misses and duplicates
-- [x] Search parser (rules + GLiNER2 / Qwen fallback), 40-example eval set, five contenders compared (ml/parser/RESULTS.md)
-- [x] LLM observability: OpenTelemetry GenAI spans → self-hosted Langfuse + Jaeger + Prometheus span metrics; eval scores attached to each call (OBSERVABILITY.md §8b)
-- [ ] Dashboard, scorer, load test runs
+- [x] Search parser (rules + GLiNER2 / Qwen fallback), 40-example eval set, five contenders compared (ml/parser/RESULTS.md); one known disambiguation bug left open (README "Known issues")
+- [x] LLM observability: OpenTelemetry GenAI spans → self-hosted Langfuse + Tempo (traces) + Loki (logs) + Prometheus span metrics; eval scores attached to each call (OBSERVABILITY.md §8b)
+- [x] Grafana dashboard (`ops/grafana/dashboards/load-radar.json`, provisioned as code) and scorer (batch + the live, rolling version in `live/score.ts`)
+- [ ] Formal load-test harness (step-load runs); live mode's controls stood in instead and found the scheduler bug above
 - [ ] `SCALING.md`: section 5 rewritten with measured numbers
 - [x] README (plain-language guide)
 - [ ] 2-minute video
 
+**Built after the original 2-day plan:**
+- [x] Live mode (`live/`, `ui/`): an always-on world, UI and rolling scorer, replacing a one-shot batch run as the main demo
+- [x] Continuous deployment to a persistent Linux server, instead of a laptop-only demo (DEPLOY.md)
+
 **Cut if behind, in this order:** LLM fallback (keep the rules parser) → classifier (keep exact dedup plus a simple fingerprint) → LLM-down run. **Never cut:** the scorer, the dashboard, the scaling write-up.
 
-**Stack:** TypeScript on Node (Numeo's stack). One engine process with in-memory, partitioned state; SQLite for searches and credentials (cold path); a snapshot file for recovery. No Redis or Kafka until a measured trigger (LLD section 12); `SCALING.md` will say which trigger fired first.
+**Stack:** TypeScript on Node (Numeo's stack). One engine process with in-memory, partitioned state. Searches and credentials currently come from flat files, not a database: `searches.ndjson` in batch mode, a JSON file per user in live mode (volume `live_state`); no snapshot-to-disk recovery is built yet, so a crash loses all in-memory state, not just a few seconds of it. No Redis or Kafka until a measured trigger (LLD section 12); `SCALING.md` will say which trigger fired first. Section 13 of LLD.md describes where a real database (Postgres) and snapshot/log replay would go in production.
 
 ## 9. Risks
 

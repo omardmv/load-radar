@@ -22,12 +22,12 @@ If a dashboard panel or alert doesn't answer one of these, it doesn't get built.
 | Signal | Use it for | Tool (demo) | Notes |
 | --- | --- | --- | --- |
 | **Metrics** | Trends, SLOs, alerts, capacity | `prom-client` → Prometheus → Grafana | Cheap; aggregated; low-cardinality labels only |
-| **Traces** | Following one load through every stage | OpenTelemetry SDK → OTel Collector → Jaeger | Sampled (section 7) |
-| **Logs** | Rare events with details: bans, circuit opens, unknown places, LLM calls | `pino` JSON to stdout (+ Loki if time allows) | Every log line carries `trace_id` when there is one |
-| **Profiles** | Why CPU or memory is high | `node --cpu-prof` + flame graphs; heap snapshots; optional Pyroscope for continuous profiling | Taken during every load-test step |
-| **Ground truth** | Real misses, duplicates and true latency | Scorer vs the simulator's answer key | Unique to this project: production systems can only estimate these |
+| **Traces** | Following one load, or one API request, through every stage | OpenTelemetry SDK → OTel Collector → Tempo → Grafana | Sampled (section 7) |
+| **Logs** | Rare events with details: bans, circuit opens, unknown places, LLM calls, every live-mode API call | `src/obs/log.ts`: JSON to stdout, and over OTLP → OTel Collector → Loki → Grafana | Every log line carries `trace_id` when there is one, so Grafana links it to its trace |
+| **Profiles** | Why CPU or memory is high | `node --cpu-prof` + flame graphs; heap snapshots | Taken during every load-test step |
+| **Ground truth** | Real misses, duplicates and true latency | Scorer vs the simulator's answer key (batch: `scorer/score.ts`; live mode: `live/score.ts`, rolling) | Unique to this project: production systems can only estimate these |
 
-Everything runs in `docker compose`: OTel Collector, Prometheus, Grafana, Jaeger (Loki and Pyroscope optional). Dashboards and alert rules are files in the repo (`dashboards/`, `alerts/`), not clicked together by hand.
+Everything runs in `docker compose` (DEPLOY.md): OTel Collector, Tempo, Loki, Prometheus, Grafana, self-hosted Langfuse, plus the models (GLiNER2, Ollama) the search parser calls. There is no Jaeger and no Pyroscope: Grafana reads Tempo and Loki directly, and profiling is ad hoc (`node --cpu-prof`) rather than continuous. The Grafana dashboard is provisioned as code (`ops/grafana/dashboards/load-radar.json`, section 10), not clicked together by hand.
 
 ## 3. The key measurement: post-to-alert latency, broken into parts
 
@@ -105,6 +105,9 @@ Prometheus histograms need bucket boundaries chosen up front; they're listed her
 | stage RED + USE metrics | | | section 4 |
 | `llm_calls_total`, `llm_latency_seconds`, `llm_tokens_total`, `llm_cost_usd_total` | | `result`, `kind` | parser only |
 | `build_info` | gauge | `git_sha`, `config_hash` | lets every graph be tied to a version and config |
+| `answer_key_settled_total` | counter | `outcome` (delivered, missed_open, missed_quick) | **built**, live mode only (`live/server.ts`, scraped as job `load-radar-live` at `live:8080/metrics`): the SLI behind the "alerts are complete" SLO |
+| `answer_key_other_total` | counter | `kind` (late, duplicate, unexpected, backfill) | **built**, live mode only: deliveries outside the answer key |
+| `answer_key_pending` | gauge | — | **built**, live mode only: expected alerts not settled yet |
 
 **Cardinality rules:**
 - **Never** label by user, credential, search, load or chat. At 1000x that's millions of series, which takes down Prometheus. Per-credential detail goes in logs and traces.
@@ -124,8 +127,13 @@ Prometheus histograms need bucket boundaries chosen up front; they're listed her
 | `match` | `candidates`, `matched_users` |
 | `deliver` | `queue_mode`, `queue_wait_ms`, `digest_size`, `post_to_alert_ms`, and the four latency parts |
 
-- **Exemplars:** each `post_to_alert_seconds` observation carries its `trace_id`. In Grafana, clicking a slow point on the latency graph opens that exact trace. (Prometheus needs `--enable-feature=exemplar-storage` and OpenMetrics format.)
-- **Looking up one load:** the canonical load id and board ids are span attributes, so "why was load X late?" is one Jaeger search.
+- **Exemplars:** each `post_to_alert_seconds` observation carries its `trace_id`. In Grafana, clicking a slow point on the latency graph opens that exact trace in Tempo. (Prometheus needs `--enable-feature=exemplar-storage` and OpenMetrics format; it's on, see `ops/prometheus.yml`.)
+- **Looking up one load:** the canonical load id and board ids are span attributes, so "why was load X late?" is one Tempo search (TraceQL, or Grafana's Traces Drilldown).
+- **From a slow alert to its trace to its logs:** this is the one path every other signal in this document points at.
+  1. Start on the "Post → alert (simulated seconds)" panel (section 10) or the `post_to_alert_seconds` histogram. A slow point on either carries an exemplar — click it to jump straight into Tempo at that exact trace.
+  2. The trace shows every span for that one API request or posting: `parse.search` and its model call, or `normalize` → `dedup` → `match` → `alert` with each stage's timing as attributes, plus the board's own `posted_at`. The slow stage is the one with the long bar.
+  3. Click "Logs for this span" (Tempo's `tracesToLogsV2`, configured in `ops/grafana/datasources.yaml`) to pivot to Loki filtered to that `trace_id`: every `log()` call made while handling that request or posting, in order, with full attributes (`search.saved`, `alert.sent`, `api.error`, …) that don't fit as span attributes.
+  4. If the call was a model call (GLiNER2 or Qwen), the same trace has a child span with `gen_ai.request.model`; the OTel Collector also routed that one span to Langfuse, so the exact prompt and output are one click away there too (section 8b).
 
 ## 7. Sampling: what we keep at scale
 
@@ -151,35 +159,42 @@ So the plan is:
 
 ## 8. Logs
 
-Structured JSON, one event per line, with fixed fields: `ts`, `level`, `event`, `trace_id`, plus event fields. Not one line per posting; the volume would be huge. Only events worth reading:
+Structured JSON, one event per line (`src/obs/log.ts`): fixed fields `ts`, `level`, `event`, plus `trace_id`/`span_id` when a span is active, plus whatever attributes the call passes. Not one line per posting; the volume would be huge — the engine's hot path (`src/engine.ts` and its stages) emits no logs at all today, only metrics (section 5) and sampled spans (section 6). Everything currently logged comes from `live/server.ts`, one event per thing a dispatcher or operator would actually want to read:
 
-| Event | Level | Fields |
-| --- | --- | --- |
-| `login.paused`, `login.circuit_open`, `login.banned` | warn / error | credential id, board, consecutive 429s, paused until |
-| `normalize.unknown_place` | warn (rate-limited) | board, raw city and state |
-| `alert.dropped_stale` | info | canonical id, age |
-| `snapshot.failed` | error | error |
-| `llm.call` | info | model, prompt, output, tokens, latency, cost, valid (LLD 10.3) |
-| `plan.rebuilt` | info | user id, entries before and after, merge ratio |
+| Event | Fields |
+| --- | --- |
+| `live.started` | port, seed, user count, speed |
+| `search.parsed` | text, summary, model call count, questions asked, whether the model fell back |
+| `search.saved` | search id, summary, original text |
+| `search.removed` | search id, `alerts_cancelled` (from `engine.refreshSearches()`) |
+| `alert.sent` | user, load id, latency (seconds), expected, late, backfill, the alert text |
+| `control.speed`, `control.volume`, `control.burst` | the new speed / `loadsPerDay` / burst parameters |
+| `parse.model_unavailable` | error (hybrid mode fell back to rules-only) |
+| `api.error` | path, error |
 
-Board passwords and tokens are never logged. A log-redaction test checks this.
+**Not built yet, but worth adding if the engine grows logging:** per-login `login.paused` / `login.banned` (today these are metrics and dashboard panels, not log lines — see "Health" in section 10), `normalize.unknown_place` when the gazetteer can't resolve a town, `alert.dropped_stale`, and `plan.rebuilt`. The design intent is the same as what's built: a fixed small set of events worth reading, not a line per posting.
+
+Board passwords and tokens are never logged. A log-redaction test checks this — **not built** (no automated tests at all, section 15 of LLD.md); today it's a code-review rule, not an enforced check.
 
 ## 8b. LLM observability (built and verified)
 
 Requirement: for every LLM call, see the prompt sent, the model, the output, token usage and latency.
 
 ```
-model call ──► one OpenTelemetry span, GenAI conventions (src/obs/llm.ts) ──► OTel Collector ─┬─► Langfuse  :3001  prompt, output, tokens, latency, eval scores
-                                                                                              ├─► Jaeger    :16686 the call inside its trace
-                                                                                              └─► Prometheus       llm_calls_total, llm_duration_* (span metrics)
+model call ──► one OpenTelemetry span, GenAI conventions (src/obs/llm.ts) ──► OTel Collector ──┬─► Tempo        :3200  the call inside its trace (default pipeline, every span)
+                                                                                                ├─► Langfuse     :3001  prompt, output, tokens, latency, eval scores (filtered: gen_ai.request.model only)
+                                                                                                └─► spanmetrics ──► Prometheus  llm_calls_total, llm_duration_milliseconds_* (same filtered spans)
 ```
 
-- **Instrument once, route in config.** Every model call (GLiNER2, Qwen via Ollama, any future LLM) goes through `traceLlmCall()`, which records `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, request parameters (e.g. temperature), `gen_ai.usage.input_tokens` / `output_tokens`, the exact input (`langfuse.observation.input`: messages, schema) and the raw output (`langfuse.observation.output`), plus errors. Swapping Langfuse for LangSmith or Phoenix is a collector change, not a code change.
-- **Collector routing** (`ops/otel-collector.yaml`): all spans go to Jaeger. A second pipeline keeps only spans with `gen_ai.request.model` and sends them to Langfuse (OTLP/HTTP, header `x-langfuse-ingestion-version: 4` for real-time ingestion) and to the `spanmetrics` connector, which turns them into Prometheus metrics with no app code.
-- **Langfuse is self-hosted** (v4, in `docker-compose.yml`, secrets in `.env`). Calls are grouped by session (`eval-<run>-<contender>`, `cli`) and tagged with metadata (contender, example kind).
+Every span goes to Tempo by default (the engine/live-mode trace pipeline isn't sampled down for model calls specifically — see section 7 for posting-level sampling). A second, filtered pipeline picks out only spans carrying `gen_ai.request.model` and sends those to Langfuse and to the `spanmetrics` connector. So a model call shows up three places: inside its parent trace in Tempo/Grafana, as a detailed observation in Langfuse, and as two Prometheus metrics.
+
+- **Instrument once, route in config.** Every model call (GLiNER2, Qwen via Ollama, any future LLM) goes through `traceLlmCall()` (`src/obs/llm.ts`), which records `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, request parameters (e.g. temperature), `gen_ai.usage.input_tokens` / `output_tokens`, the exact input (`langfuse.observation.input`: messages, schema) and the raw output (`langfuse.observation.output`), plus errors. Swapping Langfuse for LangSmith or Phoenix is a collector change, not a code change.
+- **Collector routing** (`ops/otel-collector.yaml`): the default `traces` pipeline sends every span to Tempo. A parallel `traces/genai` pipeline, filtered to spans with `gen_ai.request.model` set (`filter/genai`, dropping anything without a model attribute), sends to Langfuse (OTLP/HTTP, header `x-langfuse-ingestion-version: 4` for real-time ingestion) and to the `spanmetrics` connector, which turns those spans into Prometheus metrics (`llm_calls_total`, `llm_duration_milliseconds_*`, dimensioned by `gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`) with no app code. A third pipeline carries structured logs (OTLP) to Loki.
+- **Langfuse is self-hosted** (v4, services `langfuse-web` / `langfuse-worker` / `postgres` / `clickhouse` / `redis` / `minio` in `docker-compose.yml`, secrets in `.env`). Calls are grouped by session (`eval-<run>-<contender>`, `cli`, `live-ui`) and tagged with metadata (contender, example kind).
 - **Evals attach to calls:** `ml/parser/eval.ts` posts `eval_all_correct` and `eval_fields_correct` scores to the exact Langfuse observation that produced each answer, so a wrong answer is one click from the prompt and output that caused it.
 - **Verified** (2026-11-04): a Qwen call shows the full system and user messages, the raw JSON reply, 143 input / 50 output tokens, temperature 0 and 2.47 s; a GLiNER2 call shows the text and schema in, the spans with confidences out, 133 ms. The eval run produced 88 traced calls and 168 scores (0 failed); Prometheus counted 44 calls per model.
 - **Gotchas found:** span metrics are flushed about once a minute, so new calls appear in Prometheus with up to ~60 s delay; Prometheus labels the calling service `exported_job` / `service_name` (its own `job` label is the scrape job); Langfuse v4 removed the old `/api/public/traces` read endpoint (use `/api/public/v2/observations` or the UI).
+- **Cost of running this stack:** MinIO's health check runs every 10 s instead of the official compose file's 1 s default — at 1 s it measured about 6% of a CPU core doing nothing but health checks (`docker-compose.yml`'s comment on the `minio` service). ClickHouse (Langfuse's analytics database) idles at roughly 15% of a core, from its own internal system-log tables; left as is, since fighting ClickHouse's own housekeeping isn't worth it for a demo.
 
 ## 9. Measuring performance: load-test protocol
 
@@ -208,6 +223,8 @@ Each run follows the same steps, so results are comparable:
 | Kill and restart | Misses and duplicates caused by the restart (snapshot interval) |
 | **Observability overhead** | Same run with tracing at 100%, 1% and off. Target: instrumentation costs < 5% CPU. **Done, see [bench/overhead/RESULTS.md](bench/overhead/RESULTS.md)**: run pinned on Linux, because the laptop's ±10% noise hides 5% effects |
 
+None of the other rows have a dedicated script yet (DESIGN.md §7). Live mode's speed slider, freight-volume buttons and burst button are an informal stand-in, and pushing them already produced one real result in that shape: 120× speed and 100K loads/day banned 541 of 548 logins and missed 86.6% of loads, because the scheduler doesn't cap in-flight polls per login (README "Known issues"). That's the "users step-up" and "board slow / 429s" rows happening at once, without the dedicated harness.
+
 **Results table template** (one row per step, in `SCALING.md`):
 
 ```
@@ -216,32 +233,59 @@ Each run follows the same steps, so results are comparable:
 
 ## 10. Dashboards
 
-**1. Overview (the one that's open during every test)**
+### Built: "Load Radar" (`ops/grafana/dashboards/load-radar.json`)
+
+Provisioned as code — Grafana loads it from a file mount (`ops/grafana/dashboards.yaml`, re-read every 30 s) into a "Load Radar" folder, and it's set as the server's default home dashboard. It reads Prometheus for every panel except the last two, which read Loki, refreshes every 10 s, and defaults to the last 30 minutes:
+
+- **SLOs** (last hour, see [SLO.md](SLO.md)): alerts within 60 s and its budget left; loads alerted that stayed open 5+ min and its budget left; board requests not 429; logins banned; a burn-rate graph (1 = spending the hour's budget exactly on schedule, above 10 pages).
+- **Right now** (stat tiles): board requests/s, postings processed/s, new real loads/s, alerts sent/s, post → alert p95, logins banned.
+- **Throughput:** board requests/s by status; postings, new loads and alerts /s, all on one graph.
+- **Latency:** post → alert (simulated seconds); board request time p95; stage time p99 per posting.
+- **Health:** queue depths; logins paused/banned; dropped and failed counts.
+- **Models (search parser):** model calls/s; model call latency p95 — the `llm_calls_total` / `llm_duration_milliseconds_*` metrics from section 8b, labeled by model.
+- **Requests: traces and logs:** a table of recent API requests with a clickable trace id that opens its timeline in Tempo, and a live log panel reading Loki.
+
+This is deliberately smaller than the full design below: it's the dashboard that's actually open while using live mode, not a load-test instrument.
+
+### Design, not all built: the fuller plan
+
+**1. Overview (the one that's open during every load-test run)**
 - **Row 1, customer:** post-to-alert p50/p95/p99 by lane heat with exemplars; SLO burn rate; misses and duplicates (from the last scorer run); bans.
 - **Row 2, where time goes:** the four latency parts, stacked, by lane heat.
 - **Row 3, sources:** requests by board and status; pool wait vs board response time on the same graph (the pool signature); budget used; paused logins; freshness.
 - **Row 4, engine:** RED per stage; queue depth and wait per stage; event-loop lag; heap and GC pauses.
 - **Row 5, delivery:** alert queue depth and oldest age; queue mode; stale drops; Telegram sends, 429s, digest sizes.
 
-**2. Load test** — the same panels, with annotations at each load step and run boundary, plus the `build_info` version.
+**2. Load test** — the same panels, with annotations at each load step and run boundary, plus the `build_info` version. No formal step-load harness exists yet to produce these runs (DESIGN.md §7); the built dashboard's "Right now" row is what stands in for it today.
 
-**3. Parser and LLM** — calls, rules-vs-LLM share, validation failures, tokens, cost, latency, and "fields the user corrected" as the real accuracy signal.
+**3. Parser and LLM** — calls, rules-vs-LLM share, validation failures, tokens, cost, latency, and "fields the user corrected" as the real accuracy signal. The built dashboard's "Models" row and Langfuse (section 8b) cover the calls/latency/tokens part; the rest isn't built.
 
 ## 11. Alerts
 
-SLO alerts use **multi-window burn rates** (the Google SRE Workbook method): page only when the error budget is burning fast over both a long and a short window. A short spike doesn't page anyone, and a slow leak still gets caught.
+### Built (`ops/prometheus-rules.yml`, full detail in [SLO.md](SLO.md))
+
+SLO alerts use **multi-window burn rates** (the Google SRE Workbook method, scaled to this project's 1-hour window instead of 28–30 days, since live mode's world restarts on every deploy): page only when the error budget is burning fast over both a 5-minute and a 1-minute window. A short spike doesn't page anyone, and a real problem still pages within a minute.
 
 | Alert | Condition | Severity |
 | --- | --- | --- |
-| Latency SLO, fast burn | burn rate > 14.4 over 1 h **and** over 5 min (2% of a 30-day budget in an hour) | page |
+| `AlertLatencyBudgetFastBurn` | burn rate on the "alerts within 60 s" SLO > 10 over 5 min **and** over 1 min | page |
+| `AlertCompletenessBudgetFastBurn` | burn rate on the "loads open 5+ min get alerted" SLO > 10 over 5 min **and** over 1 min | page |
+| `BoardLoginBanned` | any login banned (`engine_gauge{name="logins_banned"} > 0`) | page |
+| `BoardRateLimitedTooOften` | over 5% of board requests answered 429, for 2 min | ticket |
+
+These are recording + alerting rules evaluated by Prometheus itself (`rule_files` in `ops/prometheus.yml`), visible at `http://localhost:9090/alerts` through the tunnel. There's no Alertmanager yet, so a "page" here means the rule fires and shows red in Prometheus/Grafana, not an actual page to a phone.
+
+### Design, not built: a fuller alert set
+
+| Alert | Condition | Severity |
+| --- | --- | --- |
 | Latency SLO, slow burn | burn rate > 6 over 6 h **and** over 30 min | page |
 | Latency SLO, leak | burn rate > 1 over 3 days | ticket |
-| Any ban | `increase(login_banned_total[5m]) > 0` | page |
 | Pool saturated | `http_pool_wait_seconds` p95 > 0.5 s for 5 min | page |
 | Event loop saturated | event-loop lag p99 > 200 ms for 5 min | ticket (page if latency also burns) |
 | Delivery falling behind | `alert_queue_oldest_seconds` > 30 s for 5 min | page |
 | Board format changed | `normalize_unknown_total` rate > 5× its weekly baseline | ticket |
-| Snapshots failing | `snapshot_failures_total` increases, or snapshot age > 30 s | ticket |
+| Snapshots failing | `snapshot_failures_total` increases, or snapshot age > 30 s | ticket (moot until section 7 of LLD.md's snapshotting is built) |
 | Telegram throttling | `telegram_429_total` rate > 1/s for 10 min | ticket |
 
 Each alert links to a runbook (section 12) and to the relevant dashboard row.
@@ -263,7 +307,7 @@ Each alert links to a runbook (section 12) and to the relevant dashboard row.
 
 | Step | Work | When |
 | --- | --- | --- |
-| 1 | `docker compose` with the OTel Collector, Prometheus (exemplars on), Grafana (provisioned data sources), Jaeger | Day 1, first hour |
+| 1 | `docker compose` with the OTel Collector, Tempo, Loki, Prometheus (exemplars on), Grafana (provisioned data sources, linked) | Day 1, first hour |
 | 2 | `src/shared/otel.ts`: SDK setup, `prom-client` default metrics (event loop, GC, heap), a `stage()` helper that wraps every stage with RED metrics, queue metrics and a span | Day 1, with the first stage |
 | 3 | Latency timestamps carried on every item; the deliver step records the four parts and the exemplar | Day 1, end to end |
 | 4 | Overview dashboard as JSON in `dashboards/` | Day 2 morning |
