@@ -11,7 +11,8 @@ export function createSimClock(opts: { simStart: number; speed: number; realStar
 }
 
 // Live mode: speed can change while running (UI slider). Re-anchors so now() never jumps.
-export function createAdjustableClock(opts: { simStart: number; speed: number }): Clock & { setSpeed(speed: number): void } {
+export type ClockAnchor = { simAnchor: number; realAnchor: number; speed: number };
+export function createAdjustableClock(opts: { simStart: number; speed: number }): Clock & { setSpeed(speed: number): void; anchor(): ClockAnchor; setAnchor(a: ClockAnchor): void } {
   let simAnchor = opts.simStart, realAnchor = Date.now(), speed = opts.speed;
   const now = () => simAnchor + (Date.now() - realAnchor) * speed;
   return {
@@ -19,6 +20,9 @@ export function createAdjustableClock(opts: { simStart: number; speed: number })
     now,
     sleep: (simMs) => new Promise((r) => setTimeout(r, Math.max(0, Math.min(simMs / speed, 1_000)))),   // wake at least every second: speed may change
     setSpeed(next) { simAnchor = now(); realAnchor = Date.now(); speed = next; },
+    // Threads share one simulated time: copy the anchor (same wall clock, same formula, same answer).
+    anchor: () => ({ simAnchor, realAnchor, speed }),
+    setAnchor(x) { simAnchor = x.simAnchor; realAnchor = x.realAnchor; speed = x.speed; },
   };
 }
 

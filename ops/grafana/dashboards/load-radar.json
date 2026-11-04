@@ -780,7 +780,7 @@
   {
    "type": "timeseries",
    "title": "CPU used (cores)",
-   "description": "One Node process can use about 1 core for JavaScript. Near 1.0 = saturated.",
+   "description": "Whole live process (engine thread + world thread). Each thread can use about 1 core.",
    "id": 17,
    "datasource": {
     "type": "prometheus",
@@ -888,7 +888,7 @@
       "uid": "prometheus"
      },
      "expr": "nodejs_eventloop_lag_p99_seconds{job=\"load-radar-engine\"}",
-     "legendFormat": "p99",
+     "legendFormat": "engine p99",
      "exemplar": true
     },
     {
@@ -898,7 +898,17 @@
       "uid": "prometheus"
      },
      "expr": "nodejs_eventloop_lag_p50_seconds{job=\"load-radar-engine\"}",
-     "legendFormat": "p50",
+     "legendFormat": "engine p50",
+     "exemplar": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "world_eventloop_lag_p99_seconds",
+     "legendFormat": "world thread p99",
      "exemplar": true
     }
    ]

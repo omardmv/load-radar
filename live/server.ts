@@ -1,6 +1,6 @@
-// Live mode: one always-on process with the whole loop, fresh data every start.
-//   world stream (new loads forever) -> simulated boards -> engine (poll, dedup, match, alert) -> simulated Telegram
-//   -> live scorer (answer key built as loads are born). The UI (ui/, shadcn) talks to the API below.
+// Live mode: one always-on process with the whole loop, fresh data every start. Two threads, two cores:
+//   world thread (live/world-worker.ts): new loads forever -> simulated boards (:7001) and Telegram (:7002), live answer key
+//   main thread (this file): engine (poll boards over HTTP, dedup, match, alert to Telegram over HTTP) + API + UI
 //
 //   node live/server.ts --port 8080 --gliner http://gliner2:7100 --otlp http://otel-collector:4318/v1/traces
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -8,15 +8,14 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname, extname, join, normalize as normPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { Worker } from 'node:worker_threads';
 import { SpanKind, SpanStatusCode, type Span } from '@opentelemetry/api';
 import client from 'prom-client';
 import { createAdjustableClock } from '../src/shared/clock.ts';
 import { BOARDS, type SearchSpec, type User, type Equip } from '../src/shared/types.ts';
 import { toUser } from '../src/data/users.ts';
 import { startEngine } from '../src/engine.ts';
-import { createBoardsHandler } from '../sims/boards-sim.ts';
-import { createTelegramHandler, type Delivery } from '../sims/telegram-sim.ts';
-import { createWorld, type Truth } from '../sim/world.ts';
+import { createWorld } from '../sim/world.ts';
 import { createPlaceIndex } from '../src/parse/places.ts';
 import { parseSearch } from '../src/parse/parse.ts';
 import { createGlinerExtractor } from '../src/parse/gliner.ts';
@@ -24,8 +23,7 @@ import { describe } from '../src/parse/normalize.ts';
 import type { ModelCall } from '../src/parse/types.ts';
 import { setupLlmTracing } from '../src/obs/llm.ts';
 import { setupLogs } from '../src/obs/log.ts';
-import { createStream } from './stream.ts';
-import { createLiveScore } from './score.ts';
+import type { ToWorld, WorldInit } from './world-worker.ts';
 
 const { values: a } = parseArgs({ options: {
   port: { type: 'string', default: '8080' }, speed: { type: 'string', default: '1' }, 'loads-per-day': { type: 'string', default: '20000' },
@@ -66,29 +64,32 @@ const send = (event: string, data: unknown) => { const msg = `event: ${event}\nd
 const recentPostings: unknown[] = [];
 const recentAlerts: unknown[] = [];
 const ring = (xs: unknown[], x: unknown, n: number) => { xs.unshift(x); if (xs.length > n) xs.pop(); };
-const lane = (t: Truth) => ({ from: `${t.origin.city}, ${t.origin.state}`, to: `${t.dest.city}, ${t.dest.state}`, equipment: t.equipment, rate: t.rate, miles: t.miles, pickup: t.pickup_date });
-let postingBatch: unknown[] = [];
 
-// ---------- the loop ----------
-const score = createLiveScore({ users, watch: YOU, createdAt });
-const stream = createStream({ world, clock, loadsPerDay: Number(a['loads-per-day']), onLoad: score.onLoad,
-  onPosting: (p) => { const x = { at: p.at, board: p.board, kind: p.kind, loadId: p.loadId, ...lane(p.truth) }; ring(recentPostings, x, 60); postingBatch.push(x); } });
-const boards = createBoardsHandler(stream.data, { clock, budgetPerMin: Number(a.budget), banAfterRejects: 20, banWindowMs: 10 * 60_000 });
-const telegram = createTelegramHandler({ clock, perBotPerSec: 30, perChatPerSec: 1, onDelivered: (d: Delivery) => {
-  const checked = score.onDelivery(d, stream.loadOf);
-  if (d.chatId !== YOU) return;
-  const alert = { at: d.at, lines: (d.text ?? '').split('\n'), loads: checked };
-  ring(recentAlerts, alert, 100);
-  send('alert', alert);
-  for (const x of checked) log('info', 'alert.sent', { user: d.chatId, load_id: x.loadId, latency_sec: x.latencySec ?? undefined, expected: x.expected, late: x.late, backfill: x.backfill, text: alert.lines.join(' | ') });
-} });
-await new Promise<void>((r) => createServer(boards).listen(7001, '127.0.0.1', r));
-await new Promise<void>((r) => createServer(telegram).listen(7002, '127.0.0.1', r));
+// ---------- the world thread ----------
+type Score = { expected: number; delivered: number; missed: number; missedOpen5Min: number; duplicates: number; unexpected: number; backfill: number; late: number; cancelled: number; missRate: number; latencySec: { p50: number | null; p95: number | null; p99: number | null } };
+type WorldStats = { world: { loads: number; postings: number; perBoard: Record<string, number>; scheduled: number }; boards: { ok: number; rejected: number; bannedRequests: number; bannedLogins: number };
+  score: { all: Score; you: Score; pending: number }; loadsPerDay: number; loopP99Ms: number };
+const zero: Score = { expected: 0, delivered: 0, missed: 0, missedOpen5Min: 0, duplicates: 0, unexpected: 0, backfill: 0, late: 0, cancelled: 0, missRate: 0, latencySec: { p50: null, p95: null, p99: null } };
+let ws: WorldStats = { world: { loads: 0, postings: 0, perBoard: {}, scheduled: 0 }, boards: { ok: 0, rejected: 0, bannedRequests: 0, bannedLogins: 0 },
+  score: { all: zero, you: zero, pending: 0 }, loadsPerDay: Number(a['loads-per-day']), loopP99Ms: 0 };
+const init: WorldInit = { seed, anchor: clock.anchor(), loadsPerDay: Number(a['loads-per-day']), budget: Number(a.budget), users, createdAt: [...createdAt], watch: YOU };
+const worldThread = new Worker(new URL('./world-worker.ts', import.meta.url), { workerData: init });
+const toWorld = (m: ToWorld) => worldThread.postMessage(m);
+worldThread.on('error', (e) => { log('error', 'world.crashed', { error: String(e) }); process.exit(1); });   // container restarts
+await new Promise<void>((resolve) => worldThread.on('message', (m) => {
+  if (m.type === 'ready') resolve();
+  else if (m.type === 'stats') ws = m;
+  else if (m.type === 'postings') { for (const x of m.postings) ring(recentPostings, x, 60); send('postings', m.postings); }
+  else if (m.type === 'alert') {
+    ring(recentAlerts, m.alert, 100);
+    send('alert', m.alert);
+    for (const x of m.alert.loads) log('info', 'alert.sent', { user: YOU, load_id: x.loadId, latency_sec: x.latencySec ?? undefined, expected: x.expected, late: x.late, backfill: x.backfill, text: m.alert.lines.join(' | ') });
+  }
+}));
 const engine = await startEngine({ users, boardsUrl: 'http://127.0.0.1:7001', telegramUrl: 'http://127.0.0.1:7002', clock, budgetPerMin: Number(a.budget),
   connectionsPerBoard: 64, metricsPort: Number(a['metrics-port']) || null, otlpEndpoint: a.otlp === 'off' ? null : a.otlp!, sampleRate: 0.01, maxUsers: 0, bots: 4 });
 
-setInterval(() => { stream.tick(); if (postingBatch.length) { send('postings', postingBatch.slice(-12)); postingBatch = []; } }, 250);
-setInterval(() => { score.sweep(clock.now()); stream.prune(); exportScore(); }, 5_000);
+setInterval(() => exportScore(), 5_000);
 
 // ---------- answer-key metrics for the SLOs (SLO.md), scraped by Prometheus at live:8080/metrics ----------
 // The live scorer keeps totals; Prometheus wants counters, so each sweep adds the change since the last one.
@@ -97,10 +98,11 @@ const settled = new client.Counter({ name: 'answer_key_settled_total', registers
   help: 'expected alerts that settled: delivered, missed_open (load stayed 5+ min: our fault), missed_quick (taken within 5 min)' });
 const other = new client.Counter({ name: 'answer_key_other_total', registers: [reg], labelNames: ['kind'],
   help: 'deliveries outside the answer key: late (after the 15 min cutoff), duplicate, unexpected, backfill' });
-new client.Gauge({ name: 'answer_key_pending', registers: [reg], help: 'expected alerts not settled yet', collect() { this.set(score.summary().pending); } });
+new client.Gauge({ name: 'answer_key_pending', registers: [reg], help: 'expected alerts not settled yet', collect() { this.set(ws.score.pending); } });
+new client.Gauge({ name: 'world_eventloop_lag_p99_seconds', registers: [reg], help: 'event-loop delay p99 of the world thread (boards, Telegram, answer key)', collect() { this.set(ws.loopP99Ms / 1000); } });
 let last = { delivered: 0, missedOpen: 0, missedQuick: 0, late: 0, duplicates: 0, unexpected: 0, backfill: 0 };
 function exportScore() {
-  const a = score.summary().all;
+  const a = ws.score.all;
   const now = { delivered: a.delivered, missedOpen: a.missedOpen5Min, missedQuick: a.missed - a.missedOpen5Min, late: a.late, duplicates: a.duplicates, unexpected: a.unexpected, backfill: a.backfill };
   const inc = (c: client.Counter<string>, label: Record<string, string>, d: number) => { if (d > 0) c.inc(label, d); };
   inc(settled, { outcome: 'delivered' }, now.delivered - last.delivered);
@@ -112,9 +114,8 @@ function exportScore() {
   inc(other, { kind: 'backfill' }, now.backfill - last.backfill);
   last = now;
 }
-const snapshot = () => ({ seed, now: clock.now(), speed: clock.speed, loadsPerDay: stream.loadsPerDay, users: users.length,
-  searches: users.reduce((n, u) => n + u.searches.length, 0), world: { ...stream.stats, scheduled: stream.pending() }, boards: boards.stats,
-  engine: engine.counts(), score: score.summary() });
+const snapshot = () => ({ seed, now: clock.now(), speed: clock.speed, loadsPerDay: ws.loadsPerDay, users: users.length,
+  searches: users.reduce((n, u) => n + u.searches.length, 0), world: ws.world, boards: ws.boards, engine: engine.counts(), score: ws.score });
 setInterval(() => send('stats', snapshot()), 1_000);
 
 // ---------- search parser (hybrid: rules + GLiNER2, every model call traced to Langfuse) ----------
@@ -143,7 +144,7 @@ let nextSearch = saved.reduce((n, s) => Math.max(n, Number(s.spec.searchId.slice
 // Saving or removing a search: rebuild the engine's index and polling plans, cancel orphaned alerts, rebuild the answer key.
 const refresh = () => span('engine.refresh_searches', {}, (s) => {
   const cancelled = engine.refreshSearches();
-  score.rebuild();
+  toWorld({ type: 'searches', userId: YOU, searches: you.searches, createdAt: [...createdAt] });   // the answer key follows
   s?.setAttributes({ 'searches.total': users.reduce((n, u) => n + u.searches.length, 0), 'alerts.cancelled': cancelled });
   return cancelled;
 });
@@ -192,12 +193,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, url: URL, reqSp
       }
       return json(res, 200, { ok: true });
     }
-    if (url.pathname === '/api/speed' && req.method === 'POST') { clock.setSpeed(Math.min(120, Math.max(1, Number((await body(req)).speed) || 1))); log('info', 'control.speed', { speed: clock.speed }); return json(res, 200, { speed: clock.speed }); }
-    if (url.pathname === '/api/rate' && req.method === 'POST') { stream.setLoadsPerDay(Math.min(500_000, Math.max(1_000, Number((await body(req)).loadsPerDay) || 20_000))); log('info', 'control.volume', { loads_per_day: stream.loadsPerDay }); return json(res, 200, { loadsPerDay: stream.loadsPerDay }); }
+    if (url.pathname === '/api/speed' && req.method === 'POST') { clock.setSpeed(Math.min(120, Math.max(1, Number((await body(req)).speed) || 1))); toWorld({ type: 'clock', anchor: clock.anchor() }); log('info', 'control.speed', { speed: clock.speed }); return json(res, 200, { speed: clock.speed }); }
+    if (url.pathname === '/api/rate' && req.method === 'POST') {
+      const loadsPerDay = Math.min(500_000, Math.max(1_000, Number((await body(req)).loadsPerDay) || 20_000));
+      toWorld({ type: 'rate', loadsPerDay }); ws.loadsPerDay = loadsPerDay;
+      log('info', 'control.volume', { loads_per_day: loadsPerDay });
+      return json(res, 200, { loadsPerDay });
+    }
     if (url.pathname === '/api/burst' && req.method === 'POST') {
       const b = await body(req);
       const city = String(b.city ?? 'Chicago'), equipment = (b.equipment ?? 'van') as Equip, count = Math.min(5_000, Number(b.count) || 500);
-      await span('world.burst', { city, equipment, count }, () => stream.burst(city, equipment, count));
+      await span('world.burst', { city, equipment, count }, () => toWorld({ type: 'burst', city, equipment, count }));
       log('info', 'control.burst', { city, equipment, count });
       return json(res, 200, { ok: true });
     }
