@@ -767,7 +767,7 @@
   },
   {
    "type": "row",
-   "title": "Throughput",
+   "title": "Saturation (how close to full)",
    "id": 16,
    "collapsed": false,
    "gridPos": {
@@ -779,9 +779,247 @@
   },
   {
    "type": "timeseries",
+   "title": "CPU used (cores)",
+   "description": "One Node process can use about 1 core for JavaScript. Near 1.0 = saturated.",
+   "id": 17,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 0,
+    "y": 18
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 2,
+      "stacking": {
+       "mode": "none"
+      },
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 0.9
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "rate(process_cpu_seconds_total{job=\"load-radar-engine\"}[1m])",
+     "legendFormat": "{{instance}}",
+     "exemplar": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Event-loop delay p99",
+   "description": "How late a timer fires. Above ~100 ms the process is too busy to react on time: every request and alert waits.",
+   "id": 18,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 6,
+    "y": 18
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 2,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "nodejs_eventloop_lag_p99_seconds{job=\"load-radar-engine\"}",
+     "legendFormat": "p99",
+     "exemplar": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "nodejs_eventloop_lag_p50_seconds{job=\"load-radar-engine\"}",
+     "legendFormat": "p50",
+     "exemplar": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Polling pressure",
+   "description": "Polls waiting in the queue, waiting for their login's previous request, in flight, and logins busy; versus poll entries (the most that can be pending).",
+   "id": 19,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 12,
+    "y": 18
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 2,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (engine_gauge{job=\"load-radar-engine\",name=~\"poll_queue|polls_waiting_for_login|polls_in_flight|logins_busy|poll_entries\"})",
+     "legendFormat": "{{name}}",
+     "exemplar": true
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Alert backlog",
+   "description": "Alerts waiting for Telegram's per-chat limit, and dropped as stale (older than 10 min).",
+   "id": 20,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 18,
+    "y": 18
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 2,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (name) (engine_gauge{job=\"load-radar-engine\",name=~\"notifier_held|alert_queue|notifier_dropped_stale\"})",
+     "legendFormat": "{{name}}",
+     "exemplar": true
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Throughput",
+   "id": 21,
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 26
+   }
+  },
+  {
+   "type": "timeseries",
    "title": "Board requests / s by status",
    "description": "200 = ok, 429 = rate limited, 403 = banned, 0 = timeout or network error.",
-   "id": 17,
+   "id": 22,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -790,7 +1028,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 18
+    "y": 27
    },
    "fieldConfig": {
     "defaults": {
@@ -831,7 +1069,7 @@
    "type": "timeseries",
    "title": "Postings, new loads and alerts / s",
    "description": "How much work flows through the pipeline.",
-   "id": 18,
+   "id": 23,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -840,7 +1078,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 18
+    "y": 27
    },
    "fieldConfig": {
     "defaults": {
@@ -900,20 +1138,20 @@
   {
    "type": "row",
    "title": "Latency",
-   "id": 19,
+   "id": 24,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 26
+    "y": 35
    }
   },
   {
    "type": "timeseries",
    "title": "Post \u2192 alert (simulated seconds)",
    "description": "From the board's posted_at to Telegram accepting the alert. Click an exemplar dot to open its trace.",
-   "id": 20,
+   "id": 25,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -922,7 +1160,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 27
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -983,7 +1221,7 @@
    "type": "timeseries",
    "title": "Board request time p95",
    "description": "Board response time, without waiting for a free connection.",
-   "id": 21,
+   "id": 26,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -992,7 +1230,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 27
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -1033,7 +1271,7 @@
    "type": "timeseries",
    "title": "Stage time p99 (per posting)",
    "description": "CPU time in each in-memory stage (1 in 16 postings timed).",
-   "id": 22,
+   "id": 27,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1042,7 +1280,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 27
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -1082,20 +1320,20 @@
   {
    "type": "row",
    "title": "Health",
-   "id": 23,
+   "id": 28,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 35
+    "y": 44
    }
   },
   {
    "type": "timeseries",
    "title": "Queues",
    "description": "Work waiting inside the engine. Growing = falling behind.",
-   "id": 24,
+   "id": 29,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1104,7 +1342,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 36
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -1145,7 +1383,7 @@
    "type": "timeseries",
    "title": "Logins paused / banned",
    "description": "Paused = backing off after 429s. Banned = board suspended the login (403).",
-   "id": 25,
+   "id": 30,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1154,7 +1392,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 36
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -1195,7 +1433,7 @@
    "type": "timeseries",
    "title": "Dropped and failed",
    "description": "Alerts dropped as stale (older than 10 min), postings the normalizer couldn't read, spans dropped.",
-   "id": 26,
+   "id": 31,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1204,7 +1442,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 36
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -1264,20 +1502,20 @@
   {
    "type": "row",
    "title": "Models (search parser)",
-   "id": 27,
+   "id": 32,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 44
+    "y": 53
    }
   },
   {
    "type": "timeseries",
    "title": "Model calls / s",
    "description": "Every GLiNER2 / Qwen call, from the GenAI spans (collector spanmetrics).",
-   "id": 28,
+   "id": 33,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1286,7 +1524,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 45
+    "y": 54
    },
    "fieldConfig": {
     "defaults": {
@@ -1327,7 +1565,7 @@
    "type": "timeseries",
    "title": "Model call latency p95",
    "description": "Per model.",
-   "id": 29,
+   "id": 34,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1336,7 +1574,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 45
+    "y": 54
    },
    "fieldConfig": {
     "defaults": {
@@ -1376,19 +1614,19 @@
   {
    "type": "row",
    "title": "Requests: traces and logs",
-   "id": 30,
+   "id": 35,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 53
+    "y": 62
    }
   },
   {
    "type": "table",
    "title": "Recent API requests (click a trace id for its timeline)",
-   "id": 31,
+   "id": 36,
    "datasource": {
     "type": "tempo",
     "uid": "tempo"
@@ -1397,7 +1635,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 54
+    "y": 63
    },
    "targets": [
     {
@@ -1416,7 +1654,7 @@
   {
    "type": "logs",
    "title": "Live service logs",
-   "id": 32,
+   "id": 37,
    "datasource": {
     "type": "loki",
     "uid": "loki"
@@ -1425,7 +1663,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 54
+    "y": 63
    },
    "options": {
     "showTime": true,

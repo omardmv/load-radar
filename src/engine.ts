@@ -43,7 +43,21 @@ export async function startEngine(cfg: EngineConfig) {
 
   const pollQueue = createBoundedQueue<PlanEntry>(20_000);
   const rawQueue = createBoundedQueue<RawPosting>(100_000);
-  const scheduler = createScheduler({ clock, budgetPerMin: cfg.budgetPerMin, dispatch: (e) => pollQueue.tryPush(e) });
+  // Overload rules for polling (SRE ch. 21-22, SLO.md):
+  // 1. Coalesce: a poll asks "what's new since my cursor", so a second copy of a poll that is still queued or running
+  //    fetches nothing new. Never queue the same entry twice: the queue can't grow past the number of entries.
+  // 2. One request in flight per login. Pausing a login after a 429 only works if nothing else is already on the
+  //    wire for it; at 120x, hundreds in flight per login turned the first 429s into 541 bans.
+  const pending = new Set<string>();                     // entry ids queued, waiting for their login, or running
+  const busyLogins = new Set<string>();
+  const waitingForLogin = new Map<string, PlanEntry[]>();
+  const pollStats = { coalesced: 0 };
+  const scheduler = createScheduler({ clock, budgetPerMin: cfg.budgetPerMin, dispatch: (e) => {
+    if (pending.has(e.entryId)) { pollStats.coalesced++; return true; }
+    if (!pollQueue.tryPush(e)) return false;
+    pending.add(e.entryId);
+    return true;
+  } });
   const rebuildPlans = () => {
     for (const u of users) {
       const plan = buildPlan(u, heat.get);
@@ -87,7 +101,7 @@ export async function startEngine(cfg: EngineConfig) {
     obs.finish(t, { board: load.board, dedup: d.result, candidates: m.candidates, alerts: offered });
   };
 
-  const notifier = createNotifier({ clock, queue: alertQueue, bots: cfg.bots, perBotPerSec: 30, perChatPerSec: 1, maxDigest: 5,
+  const notifier = createNotifier({ clock, queue: alertQueue, bots: cfg.bots, perBotPerSec: 30, perChatPerSec: 1, maxDigest: 5, burstDigest: 20, deadlineMs: 10 * 60_000, maxHeldPerChat: 200,
     send: async (botId, chatId, alerts) => {
       try {
         const res = await fetch(`${cfg.telegramUrl}/bot${botId}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -101,11 +115,24 @@ export async function startEngine(cfg: EngineConfig) {
 
   let running = true;
   const maxInFlight = cfg.connectionsPerBoard * 4;
+  const startPoll = (e: PlanEntry) => {
+    busyLogins.add(e.credentialId);
+    void poller.poll(e).finally(() => {
+      pending.delete(e.entryId);
+      const next = waitingForLogin.get(e.credentialId)?.shift();
+      if (next && running) startPoll(next);                // the login's next poll goes as soon as this one is back
+      else busyLogins.delete(e.credentialId);
+    });
+  };
   const pumpPolls = async () => {
     while (running) {
       await Promise.race([pollQueue.waitForItems(), new Promise((r) => setTimeout(r, 50))]);
       while (running && pollQueue.size() && poller.inFlight() < maxInFlight) {
-        for (const e of pollQueue.takeBatch(maxInFlight - poller.inFlight()).items) void poller.poll(e);
+        for (const e of pollQueue.takeBatch(maxInFlight - poller.inFlight()).items) {
+          if (!busyLogins.has(e.credentialId)) { startPoll(e); continue; }
+          const w = waitingForLogin.get(e.credentialId);
+          if (w) w.push(e); else waitingForLogin.set(e.credentialId, [e]);
+        }
       }
       await new Promise((r) => setTimeout(r, 1));
     }
@@ -136,7 +163,10 @@ export async function startEngine(cfg: EngineConfig) {
   void loop(() => rebuildPlans(), 10 * 60_000);
   const gaugeTimer = setInterval(() => {
     const s = scheduler.stats();
+    let waiting = 0; for (const w of waitingForLogin.values()) waiting += w.length;
     obs.gauges({ poll_queue: pollQueue.size(), raw_queue: rawQueue.size(), alert_queue: alertQueue.size(), alert_queue_oldest_wait_ms: alertQueue.oldestWaitMs(),
+      polls_waiting_for_login: waiting, polls_coalesced: pollStats.coalesced, logins_busy: busyLogins.size, poll_entries: s.entries,
+      raw_queue_fill: rawQueue.size() / rawQueue.capacity, notifier_dropped_stale: notifier.droppedStale(),
       alerts_dropped_stale: alertQueue.dropped(), polls_in_flight: poller.inFlight(), logins_paused: s.paused, logins_banned: s.banned, scheduler_stretch: s.stretch, notifier_held: notifier.held() });
   }, 1_000);
 
@@ -150,13 +180,13 @@ export async function startEngine(cfg: EngineConfig) {
       const gone = (a: Alert) => !a.searchIds.some((id) => active.has(id));
       return alertQueue.removeWhere(gone) + notifier.removeWhere(gone);
     },
-    counts: () => ({ ...counts, alertsDropped: alertQueue.dropped(), alertQueue: alertQueue.size(), pollQueue: pollQueue.size(), rawQueue: rawQueue.size(), scheduler: scheduler.stats() }),
+    counts: () => ({ ...counts, alertsDropped: alertQueue.dropped() + notifier.droppedStale(), pollsCoalesced: pollStats.coalesced, alertQueue: alertQueue.size(), pollQueue: pollQueue.size(), rawQueue: rawQueue.size(), scheduler: scheduler.stats() }),
     async stop(): Promise<EngineSummary> {
       running = false;
       clearInterval(gaugeTimer);
       await poller.close();
       await obs.close();
-      return { ...counts, alertsDropped: alertQueue.dropped(), scheduler: scheduler.stats() };
+      return { ...counts, alertsDropped: alertQueue.dropped() + notifier.droppedStale(), scheduler: scheduler.stats() };
     },
   };
 }

@@ -7,8 +7,11 @@ const hash = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = 
 
 // Sends alerts within Telegram's limits (LLD 6.9): per bot and per chat token buckets; a chat with several
 // waiting alerts gets them merged into one digest message.
+// Under backlog (SLO.md, overload rules): freshest alerts first, alerts past the deadline dropped (a load posted
+// 10+ minutes ago is likely gone), a bigger digest when many are waiting, and a cap per chat.
 export function createNotifier(opts: {
   clock: Clock; queue: AlertQueue; bots: number; perBotPerSec: number; perChatPerSec: number; maxDigest: number;
+  burstDigest?: number; deadlineMs?: number; maxHeldPerChat?: number;
   send(botId: number, chatId: string, alerts: Alert[]): Promise<{ ok: boolean; retryAfterSec?: number }>;
   onSent(alerts: Alert[], at: number): void;
 }) {
@@ -22,6 +25,8 @@ export function createNotifier(opts: {
     return b;
   };
   const heldCount = () => { let n = 0; for (const l of held.values()) n += l.length; return n; };
+  let droppedStale = 0;
+  const deadlineMs = opts.deadlineMs ?? Infinity, maxHeld = opts.maxHeldPerChat ?? Infinity, burst = opts.burstDigest ?? opts.maxDigest;
 
   async function tick(): Promise<number> {
     for (const a of opts.queue.take(1000).alerts) {
@@ -35,9 +40,16 @@ export function createNotifier(opts: {
       if (botPausedUntil[bot] > now) continue;
       const cb = chatBucket(chat);
       if (cb.nextTokenAt() > now || botBuckets[bot].nextTokenAt() > now) continue;
+      // drop what is too old to matter, keep the freshest, cap the pile
+      let live = list.filter((a) => now - a.postedAt <= deadlineMs);
+      if (live.length > maxHeld) live = live.sort((a, b) => b.postedAt - a.postedAt).slice(0, maxHeld);
+      droppedStale += list.length - live.length;
+      if (!live.length) { held.delete(chat); continue; }
       cb.take(); botBuckets[bot].take();
-      const batch = list.splice(0, opts.maxDigest);
-      if (!list.length) held.delete(chat);
+      const size = live.length > opts.maxDigest * 2 ? burst : opts.maxDigest;
+      if (live.length > size) live.sort((a, b) => b.postedAt - a.postedAt);   // backlog: freshest first
+      const batch = live.splice(0, size);
+      if (live.length) held.set(chat, live); else held.delete(chat);
       sends.push(opts.send(bot, chat, batch).then((r) => {
         if (r.ok) { opts.onSent(batch, opts.clock.now()); return; }
         botPausedUntil[bot] = opts.clock.now() + (r.retryAfterSec ?? 1) * 1000;
@@ -52,6 +64,7 @@ export function createNotifier(opts: {
   return {
     tick,
     held: heldCount,
+    droppedStale: () => droppedStale,
     // Alerts already taken from the queue wait here for Telegram's per-chat limit; drop them too.
     removeWhere(drop: (a: Alert) => boolean) {
       let n = 0;

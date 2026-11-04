@@ -74,3 +74,10 @@ groups:
         labels: { severity: ticket, slo: board-friendly }
         annotations:
           summary: "Over 5% of board requests answered 429: the scheduler is asking faster than the boards allow."
+      # Saturation (SRE golden signal): not an SLO, a warning that one soon will be.
+      - alert: EngineSaturated
+        expr: max(nodejs_eventloop_lag_p99_seconds{job="load-radar-engine"}) > 0.1 and max(rate(process_cpu_seconds_total{job="load-radar-engine"}[1m])) > 0.9
+        for: 2m
+        labels: { severity: ticket }
+        annotations:
+          summary: "The engine process is saturated: event-loop p99 above 100 ms at ~1 core. Expect SLO 1 to burn next."
