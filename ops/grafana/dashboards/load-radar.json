@@ -371,7 +371,7 @@
       "fillOpacity": 10,
       "lineWidth": 2,
       "stacking": {
-       "mode": "normal"
+       "mode": "none"
       }
      }
     },
