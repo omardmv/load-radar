@@ -223,7 +223,7 @@ Each run follows the same steps, so results are comparable:
 | Kill and restart | Misses and duplicates caused by the restart (snapshot interval) |
 | **Observability overhead** | Same run with tracing at 100%, 1% and off. Target: instrumentation costs < 5% CPU. **Done, see [bench/overhead/RESULTS.md](bench/overhead/RESULTS.md)**: run pinned on Linux, because the laptop's ±10% noise hides 5% effects |
 
-None of the other rows have a dedicated script yet (DESIGN.md §7). Live mode's speed slider, freight-volume buttons and burst button are an informal stand-in, and pushing them already produced one real result in that shape: 120× speed and 100K loads/day banned 541 of 548 logins and missed 86.6% of loads, because the scheduler doesn't cap in-flight polls per login (README "Known issues"). That's the "users step-up" and "board slow / 429s" rows happening at once, without the dedicated harness.
+None of the other rows have a dedicated script yet (DESIGN.md §7). Live mode's speed slider, freight-volume buttons and burst button are an informal stand-in, and pushing them already produced one real result in that shape: 120× speed and 100K loads/day banned 541 of 548 logins and missed 86.6% of loads, because the scheduler didn't cap in-flight polls per login (fixed since; SLO.md has the before/after). That's the "users step-up" and "board slow / 429s" rows happening at once, without the dedicated harness.
 
 **Results table template** (one row per step, in `SCALING.md`):
 

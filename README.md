@@ -169,7 +169,7 @@ Open **http://localhost:8080** (served by the server, through the tunnel). The `
 
 **Known issues found this way:**
 - **Parser:** "loads out of springfield tmrw" resolves Springfield as the origin, but because the equipment is still missing the model runs too and is asked for a destination; it echoes the same place back, so the dispatcher is asked "Which Springfield?" twice, once for origin and once for destination, instead of once. Not fixed yet.
-- **Scheduler under heavy load:** at 120× speed and 100K loads/day, a run banned 541 of 548 logins and missed 86.6% of loads. The scheduler fires each login's next poll on a timer and doesn't check whether that login's previous poll is still in flight, so at high speed hundreds of requests for the same login can be queued before the first response (and its 429) comes back. The fix is a per-login cap of one poll in flight; not built yet.
+- **Scheduler under heavy load:** at 120× speed and 100K loads/day, a run banned 541 of 548 logins and missed 86.6% of loads. The scheduler fires each login's next poll on a timer and doesn't check whether that login's previous poll is still in flight, so at high speed hundreds of requests for the same login can be queued before the first response (and its 429) comes back. Fixed (2026-11-04): at most one poll in flight per login, duplicate polls coalesced, and fresh-first alerts under backlog; see SLO.md for the before/after at 30×.
 
 Code: [live/](live/) (stream, live scorer, API) and [ui/](ui/) (React + shadcn/ui). UI development: `cd ui && npm run dev` (proxies `/api` to localhost:8080).
 

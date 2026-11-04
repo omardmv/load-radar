@@ -233,7 +233,7 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 
 No central store sits on the hot path at any stage; LLD section 12 lists the measured triggers for adding one.
 
-**Measured, not just hypothesized, before 10x:** pushing live mode (one process) to 120× speed and 100K loads/day banned 541 of 548 logins and missed 86.6% of loads. Cause: the scheduler fires each login's next poll on a timer without checking whether that login's previous poll already got a response, so at high speed hundreds of requests for one login can be in flight before the first 429 comes back. The fix is a per-login cap of one poll in flight; not built yet (README "Known issues").
+**Measured, not just hypothesized, before 10x:** pushing live mode (one process) to 120× speed and 100K loads/day banned 541 of 548 logins and missed 86.6% of loads. Cause: the scheduler fires each login's next poll on a timer without checking whether that login's previous poll already got a response, so at high speed hundreds of requests for one login can be in flight before the first 429 comes back. Fixed: at most one poll in flight per login and duplicate polls coalesced (`src/engine.ts`); before/after in SLO.md.
 
 ## 6. Observability
 

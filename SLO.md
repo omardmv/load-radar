@@ -44,5 +44,29 @@ and burn rate over time.
 | Logins banned (0) | 0 | 0 |
 
 At normal speed every SLO holds; at 30× the single live process can't keep up and the speed SLO pages within minutes.
-The knee is somewhere between; finding it is the capacity step. An earlier run at 120× and 100K loads/day banned
-541 of 548 logins (SLO 3) because hundreds of requests per login were in flight when the first 429 came back.
+An earlier run at 120× and 100K loads/day banned 541 of 548 logins (SLO 3) because hundreds of requests per login were
+in flight when the first 429 came back.
+
+### After the overload rules (same 30× test, 5 min)
+
+Changes (SRE ch. 21–22): a poll still queued or running is never queued again (polls ask "what's new since my cursor",
+so a copy fetches nothing); at most one request in flight per login; under alert backlog, freshest first, alerts
+older than 10 min dropped, digests of 20 instead of 5.
+
+| | Before | After |
+| --- | --- | --- |
+| Alerts within 60 s (99%) | 48.8% | **83.7%** |
+| Post → alert p50 | minutes | **29 s** |
+| Loads alerted, open 5+ min (99%) | 92.3% | **87.9%** (worse) |
+| Board 429s / banned logins | 0 / 0 | 0 / 0 |
+| Alert backlog (held for Telegram) | growing | 0 |
+| Board requests | not recorded | 2,630/s |
+| Engine CPU / event-loop p99 | not recorded | 1.23 cores / 44 ms |
+| Polls coalesced | (no such rule) | 1.76 M in 5 min |
+
+What it means: the overload now goes where it should. Alerts that are sent arrive on time instead of piling up, and
+logins can't be banned by our own backlog. The cost moved to completeness: 526 of ~534 logins always have one request
+on the wire, ~900 polls wait their turn, and each request takes ~200 ms because the simulated boards share the
+engine's single process and core. So each search's area is polled less often and some loads are taken before we see
+them. Next: give the boards their own process and the engine more cores (capacity), and test realistic scale at 1×
+with more logins, since 30× asks each login for 30 requests a second, which no real board allows.
