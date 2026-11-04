@@ -2,7 +2,7 @@
 
 **Load Radar watches US truckload boards for a dispatcher and alerts them the moment a load matching one of their saved searches is posted, then helps decide whether to take it.** A dispatcher types a search in plain English ("reefer out of Fresno, nothing under $3"), and the system polls every board on that dispatcher's own logins within each board's limits, recognizes the same load posted many times, matches it against thousands of saved searches, and delivers one alert per real load within seconds. Every part is measured against a written target (SLOs) and an answer key.
 
-It's built as an interview project for [Numeo](https://numeo.ai), which makes AI agents for trucking, with the focus on **backend/infrastructure** (scale, overload, observability) and **AI/ML** (a trained dedup classifier, a search parser, a load-decision agent with evals). Everything runs on one Linux laptop, deploys itself on every push, and can be tried live in a browser.
+The focus is on **backend/infrastructure** (scale, overload, observability) and **AI/ML** (a trained dedup classifier, a search parser, a load-decision agent with evals). Everything runs on one Linux laptop, deploys itself on every push, and can be tried live in a browser.
 
 ### What it consists of
 
@@ -34,7 +34,7 @@ The rest of this page is a plain-language guide: the problem, why it's built thi
 
 **The pain.** When a truck goes empty, the dispatcher searches the boards and refreshes them all day. Good loads are taken within minutes, so whoever sees one first wins.
 
-**The product.** The dispatcher saves a search once ("van, near Chicago, at least $2.80 a mile"). Our system watches every board and **sends an alert to their phone the moment a matching load appears.** Numeo sells this as "Load Radar". This project is our version of it, designed to grow 1000x.
+**The product.** The dispatcher saves a search once ("van, near Chicago, at least $2.80 a mile"). Our system watches every board and **sends an alert to their phone the moment a matching load appears.** This project builds it, designed to grow 1000x.
 
 **Why it's hard.** Not because of the amount of freight: new loads arrive only a few per second. It's hard because:
 1. **Each customer's searches must run on that customer's own board login.** DAT's rules say one login is for one person, so one check can't serve two customers. The number of checks grows with customers × searches × boards.
@@ -42,16 +42,14 @@ The rest of this page is a plain-language guide: the problem, why it's built thi
 3. **The same load shows up many times:** refreshed, reposted, posted on several boards, re-posted by a second broker.
 4. **One load can match thousands of saved searches**, and Telegram only allows about 30 messages per second per bot.
 
-## 2. Why we're building this
+## 2. Goals
 
-This is an interview project for Numeo, which builds AI agents for trucking. Their job post says what they value, and each one maps to a part of this project:
-
-| They value | Shown here by |
+| Goal | How the project meets it |
 | --- | --- |
-| "What breaks first at 1000x?" answered with specifics | A design with a ranked list of breaking points, and load tests that measure them |
-| Observability-obsessed | Metrics, tracing and dashboards designed up front, and their cost measured (it's now +1%) |
-| Customer-obsessed | Everything is judged by what the dispatcher feels: speed, nothing missed, no duplicates, account safe |
-| Architecture over code | Every decision below comes with the alternative and the trade-off |
+| Answer "what breaks first at 1000x?" with specifics | A design with a ranked list of breaking points, and load tests that measure them |
+| Observability from day one | Metrics, tracing, logs and dashboards designed up front, and their cost measured (it's now +1%) |
+| Judge everything by what the dispatcher feels | Speed, nothing missed, no duplicates, account safe: written down as SLOs and scored live |
+| Explain every decision | Every decision below comes with the alternative and the trade-off |
 
 ### Focus
 
@@ -127,7 +125,7 @@ Every choice has a cost. These are the main ones; [DESIGN.md](DESIGN.md) section
 | **Alert order:** oldest first normally, freshest first when overloaded | Oldest-first keeps waits short; when overloaded, old loads are probably taken | Always first-in-first-out | Some old alerts are dropped on purpose |
 | **Lite metrics + our own 1% tracing, 1 span per load** | Measured: +1% CPU instead of +18–41% | Default tracing setup | Per-step timings come from 1 in 16 loads; fewer traces kept |
 | **Synthetic data** calibrated to real numbers | Can't scrape real boards (their rules); gives an answer key | Scraping real boards | Results are only as real as the simulator (assumptions are listed) |
-| **TypeScript on Node** | Numeo's stack | Go or Rust (faster per core) | One thread per process; more processes needed sooner |
+| **TypeScript on Node** | One language for the engine, simulators and UI; measured fast enough per posting | Go or Rust (faster per core) | One thread per process; more processes needed sooner |
 
 ## 6. How it grows to 1000x
 

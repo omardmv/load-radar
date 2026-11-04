@@ -16,7 +16,7 @@ This is the **high-level design**: the problem, the constraints, the parts and w
 
 **The pain.** When a truck goes empty in Chicago, the dispatcher searches every board for "van, within 50 miles of Chicago, at least $2.80/mile" and refreshes all day. Good loads are gone in minutes, so whoever sees one first gets it.
 
-**The product.** The dispatcher saves a search once. The system watches every board and **alerts their phone the moment a matching load appears.** Numeo sells this as Load Radar. This project is my take on scaling it. It doesn't copy their internals, which I don't know.
+**The product.** The dispatcher saves a search once. The system watches every board and **alerts their phone the moment a matching load appears.** This project designs that system to scale.
 
 **What the customer needs**, in priority order:
 
@@ -41,7 +41,7 @@ Reads outnumber new loads about 1000 to 1. **The work is in polling, deduplicati
 
 | Constraint | Evidence | What it forces |
 | --- | --- | --- |
-| One login per person; no sharing, no scraping tools | [DAT](https://www.dat.com/blog/why-dat-doesnt-allow-login-sharing-or-data-scraping-extensions): "Each DAT login is for one person." Numeo's pages say customers connect their own accounts | A result fetched with customer A's login can **only alert customer A**. No cross-customer cache for gated boards |
+| One login per person; no sharing, no scraping tools | [DAT](https://www.dat.com/blog/why-dat-doesnt-allow-login-sharing-or-data-scraping-extensions): "Each DAT login is for one person." Board tools in this market connect each customer's own account | A result fetched with customer A's login can **only alert customer A**. No cross-customer cache for gated boards |
 | Different customers see different loads | Broker portals only show loads to approved carriers | Every posting carries **who is allowed to see it** |
 | Each login has a request budget; abuse gets it banned | Board behavior (simulated) | The scheduler spends a per-login budget. A ban is the worst outcome |
 | Telegram: ~30 msg/s per bot, ~1 msg/s per chat | [Telegram Bot FAQ](https://core.telegram.org/bots/faq) | 5,000 alerts for one hot load take ~170 s from one bot. Delivery is a bottleneck |
@@ -204,7 +204,7 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 | 13 | **Observability: lite metrics + our own 1% head sampling + 1 span per posting; slow or failed postings recorded after the fact** | Measured +1.0% CPU, vs +18% (default 1% tracing) and +41% with 3% span loss (default 100%) | Default OTel setup; collector tail sampling (needs 100% export) | Stage histograms from 1 in 16 postings; fewer traces kept; counters and post-to-alert latency stay exact |
 | 14 | **Synthetic data calibrated to real numbers**, with an answer key | Boards forbid scraping; the answer key makes misses and latency measurable exactly | Scraped samples | Results depend on simulator assumptions (`sim/ASSUMPTIONS.md`, `sim/validate.ts`) |
 | 15 | **Benchmarks on a pinned Linux core**, noise floor reported | Laptop noise (±10%) hides 5% effects; pinned: ±1.4% | Laptop runs | Needs a Linux machine (the `dev` server) |
-| 16 | **TypeScript on Node** | Numeo's stack | Go or Rust | One JS thread per process: worker threads and more processes needed sooner |
+| 16 | **TypeScript on Node** | One language for engine, simulators and UI; measured fast enough per posting | Go or Rust | One JS thread per process: worker threads and more processes needed sooner |
 | 17 | **Live mode as one process** (`live/server.ts`): world, board/Telegram simulators, engine and UI together, on one adjustable clock | Simplest thing that gives a visitor a running demo; the live scorer needs the same clock as everything it's scoring | Separate processes per simulator, like batch mode | One process to restart; the same single-core ceiling as the engine itself (found at 120×/100K loads/day, README "Known issues") |
 | 18 | **Tempo + Loki, not Jaeger**, for traces and logs | Both are Grafana's own backends: one UI for metrics, traces and logs, linked (log → trace by `trace_id`, trace → logs, latency exemplars → trace). Tempo's `local-blocks` processor gives TraceQL rate/error/duration metrics with no separate query engine | Jaeger (own UI, no built-in log link); a hosted trace backend | One more self-hosted service (Loki) to run and keep healthy |
 | 19 | **Pull-based continuous deploy** (cron runs `ops/server/deploy.sh` every minute: fetch, fast-forward, rebuild) over a self-hosted CI runner on this public repo | A self-hosted GitHub Actions runner on a public repo executes any PR's code; cron only ever reads `main` from GitHub, and the server accepts no inbound connections at all | Self-hosted Actions runner; a webhook-triggered deploy (needs an open port) | Up to a minute of deploy lag; no rollback button, just `git revert` and push |
@@ -256,7 +256,7 @@ Summary:
 | `match_fanout` (histogram) | Are hot cells overloading us? |
 | `alert_queue_depth`, `alert_queue_oldest_seconds`, `alerts_dropped_stale_total` | Is delivery keeping up? |
 
-**LLM call log:** for every parser call, the prompt, model, output, tokens, latency, cost, and whether the output passed validation. Numeo's own trial task asks for exactly these fields.
+**LLM call log:** for every parser call, the prompt, model, output, tokens, latency, cost, and whether the output passed validation.
 
 **Ground truth.** The simulator knows when each load was really posted and which searches should have matched. That lets the scorer measure **latency, misses and duplicates exactly**, which a production system can only estimate.
 
@@ -308,17 +308,16 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 
 **Cut if behind, in this order:** LLM fallback (keep the rules parser) → classifier (keep exact dedup plus a simple fingerprint) → LLM-down run. **Never cut:** the scorer, the dashboard, the scaling write-up.
 
-**Stack:** TypeScript on Node (Numeo's stack). One engine process with in-memory, partitioned state. Searches and credentials currently come from flat files, not a database: `searches.ndjson` in batch mode, a JSON file per user in live mode (volume `live_state`); no snapshot-to-disk recovery is built yet, so a crash loses all in-memory state, not just a few seconds of it. No Redis or Kafka until a measured trigger (LLD section 12); `SCALING.md` will say which trigger fired first. Section 13 of LLD.md describes where a real database (Postgres) and snapshot/log replay would go in production.
+**Stack:** TypeScript on Node. One engine process with in-memory, partitioned state. Searches and credentials currently come from flat files, not a database: `searches.ndjson` in batch mode, a JSON file per user in live mode (volume `live_state`); no snapshot-to-disk recovery is built yet, so a crash loses all in-memory state, not just a few seconds of it. No Redis or Kafka until a measured trigger (LLD section 12); `SCALING.md` will say which trigger fired first. Section 13 of LLD.md describes where a real database (Postgres) and snapshot/log replay would go in production.
 
 ## 9. Risks
 
 - **Laptop numbers aren't production numbers.** Report which stage saturates first and how the system degrades, not absolute capacity.
 - **Results are only as good as the simulator.** Every assumption is listed in `sim/ASSUMPTIONS.md` so it can be challenged.
-- **This is Numeo's feature.** Present it as "how I'd scale this," without claiming knowledge of their system.
 
-## 10. Questions for Numeo
+## 10. Open questions (answers would change the design)
 
-- Is Load Radar bound by polling on customer logins, or do you get push feeds from boards and brokers?
-- What's your post-to-alert latency today, and do you measure missed matches?
-- What does your DAT partnership allow that a normal login doesn't?
+- Is a product like this bound by polling on customer logins, or can it get push feeds from boards and brokers?
+- What post-to-alert latency do dispatchers actually need, and how often do real systems miss matches?
+- What do board partnerships allow that a normal login doesn't (higher limits, shared feeds)?
 - Which channel do dispatchers act on fastest: push, Telegram or SMS?
