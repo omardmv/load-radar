@@ -1523,7 +1523,7 @@
   },
   {
    "type": "row",
-   "title": "Models (search parser)",
+   "title": "Models (search parser, dedup classifier)",
    "id": 32,
    "collapsed": false,
    "gridPos": {
@@ -1594,7 +1594,7 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
+    "w": 6,
     "x": 12,
     "y": 54
    },
@@ -1634,9 +1634,59 @@
    ]
   },
   {
+   "type": "timeseries",
+   "title": "Dedup decisions / s",
+   "description": "Classifier (ML.md): new = a real load seen for the first time; merged = same load as one already seen (repost, cross-post, co-broker); refresh/updated = same board id.",
+   "id": 35,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 18,
+    "y": 54
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 2,
+      "stacking": {
+       "mode": "none"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (result) (rate(dedup_total{job=\"load-radar-engine\"}[5m]))",
+     "legendFormat": "{{result}}",
+     "exemplar": true
+    }
+   ]
+  },
+  {
    "type": "row",
    "title": "Requests: traces and logs",
-   "id": 35,
+   "id": 36,
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -1648,7 +1698,7 @@
   {
    "type": "table",
    "title": "Recent API requests (click a trace id for its timeline)",
-   "id": 36,
+   "id": 37,
    "datasource": {
     "type": "tempo",
     "uid": "tempo"
@@ -1676,7 +1726,7 @@
   {
    "type": "logs",
    "title": "Live service logs",
-   "id": 37,
+   "id": 38,
    "datasource": {
     "type": "loki",
     "uid": "loki"

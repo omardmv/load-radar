@@ -14,6 +14,7 @@ COPY src src
 COPY sim sim
 COPY sims sims
 COPY live live
+COPY ml/dedup/model.json ml/dedup/model.json
 COPY --from=ui /ui/dist ui/dist
 EXPOSE 8080 9464
 ENTRYPOINT ["node", "live/server.ts"]

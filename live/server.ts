@@ -29,7 +29,7 @@ const { values: a } = parseArgs({ options: {
   port: { type: 'string', default: '8080' }, speed: { type: 'string', default: '1' }, 'loads-per-day': { type: 'string', default: '20000' },
   users: { type: 'string', default: '300' }, seed: { type: 'string', default: '' }, budget: { type: 'string', default: '60' },
   gliner: { type: 'string', default: 'http://127.0.0.1:7100' }, otlp: { type: 'string', default: 'off' }, 'metrics-port': { type: 'string', default: '9464' },
-  state: { type: 'string', default: 'data/live' } } });
+  state: { type: 'string', default: 'data/live' }, 'dedup-model': { type: 'string', default: '' } } });
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Traces: one per API request (every step, the model's input and output) -> collector -> Tempo; model spans also -> Langfuse.
@@ -87,7 +87,7 @@ await new Promise<void>((resolve) => worldThread.on('message', (m) => {
   }
 }));
 const engine = await startEngine({ users, boardsUrl: 'http://127.0.0.1:7001', telegramUrl: 'http://127.0.0.1:7002', clock, budgetPerMin: Number(a.budget),
-  connectionsPerBoard: 64, metricsPort: Number(a['metrics-port']) || null, otlpEndpoint: a.otlp === 'off' ? null : a.otlp!, sampleRate: 0.01, maxUsers: 0, bots: 4 });
+  connectionsPerBoard: 64, metricsPort: Number(a['metrics-port']) || null, otlpEndpoint: a.otlp === 'off' ? null : a.otlp!, sampleRate: 0.01, maxUsers: 0, bots: 4, dedupModel: a['dedup-model'] || null });
 
 setInterval(() => exportScore(), 5_000);
 

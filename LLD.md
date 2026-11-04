@@ -288,6 +288,8 @@ The generator's reposts with a **new** id, cross-posts, and co-broker copies all
 
 **Stage 2: same-load classifier**
 
+*Built (2026-11-04): logistic regression trained on answer-key pairs; features, threshold policy, results and limits in [ML.md](ML.md).*
+
 - **Candidates:** the block `(pickupDate, oCell, dCell, equip)` plus the 8 neighboring origin cells (a town can sit on a cell edge), limited to postings within the last 6 hours. Block entries carry the classifier's features, so scoring needs no extra lookups.
 - **Features per candidate pair:** relative rate difference; whether either rate is missing; same broker MC; Jaro-Winkler similarity of origin and destination names; origin and destination distance in miles; difference in posting time; same board or not; weight difference; same `equipmentDetail`.
 - **Model:** logistic regression, trained on pairs from the generator's answer key. Positive pairs are postings of the same `load_id`. Negative pairs are the hard ones: **siblings** (same lane, same broker, different pickup day), which the pickup-date block already separates but are checked anyway, plus same-lane loads from different brokers.
@@ -547,7 +549,7 @@ load-radar/
   src/
     shared/       types.ts, queue.ts (bounded), heap.ts, expiring.ts (hourly eviction), clock.ts, geo.ts
     normalize/    gazetteer.ts, normalize.ts
-    dedup/        dedup.ts — rule-based stand-in; no trained classifier yet
+    dedup/        dedup.ts (two stages, pluggable decision), features.ts (18 pair features, shared with training), classifier.ts (logistic scoring + parity check)
     match/        matcher.ts, filters.ts
     plan/         heat.ts, planner.ts
     schedule/     scheduler.ts

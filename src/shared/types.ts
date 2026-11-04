@@ -28,6 +28,7 @@ export interface Load {
   key: string; board: Board; boardLoadId: string; brokerMc: string;
   origin: Place; dest: Place; equipment: Equip; equipmentDetail: string;
   rate: number | null; miles: number; pickupDate: string;
+  weightLbs: number | null; notes: string;   // dedup signals: a real load keeps its weight and comments across boards
   postedAt: number; contentHash: string; visibleTo: Visibility;
   canonicalId: string;   // '' until dedup assigns it
 }

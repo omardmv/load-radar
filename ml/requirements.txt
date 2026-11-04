@@ -1,0 +1,5 @@
+gliner2==2.1.0
+torch==2.15.0
+transformers==5.22.1
+scikit-learn==1.9.1
+lightgbm==4.7.0

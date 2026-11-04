@@ -32,7 +32,7 @@ This is an interview project for Numeo, which builds AI agents for trucking. The
 ### Focus
 
 The project goes deep on two areas: **backend/infrastructure** (scaling, measurement, observability) and **AI/ML**, where the system genuinely needs it:
-- **ML: same-load classifier** for dedup. The simple rule wrongly merged 12% of loads; the classifier is trained on the generator's answer key, and its effect on misses and duplicates is measured end to end.
+- **ML: same-load classifier** for dedup. The simple rule wrongly merged 12% of loads; the classifier is trained on the generator's answer key, and its effect on misses and duplicates is measured end to end. Built: see [ML.md](ML.md).
 - **Search parser: rules + a small model.** Rules handle dispatcher shorthand; a small local model (GLiNER2, or Qwen via Ollama) fills what the rules miss; one normalizer resolves places, regions and typos and asks instead of guessing. Five contenders compared on one eval set: [ml/parser/RESULTS.md](ml/parser/RESULTS.md).
 - **LLM observability:** every model call is an OpenTelemetry GenAI span, routed to self-hosted **Langfuse** (prompt, output, tokens, latency, eval scores), Grafana (Tempo for the trace, Loki for the logs) and Prometheus. See OBSERVABILITY.md §8b.
 
@@ -154,7 +154,7 @@ Rough stages. The load tests replace these guesses with measurements.
 | Search parser (rules + GLiNER2, Qwen fallback) | ✅ Built; five contenders compared on one eval set ([ml/parser/RESULTS.md](ml/parser/RESULTS.md)); one known bug below |
 | Observability (Tempo, Loki, Langfuse, Prometheus, a provisioned Grafana dashboard, SLOs with burn-rate alerts) | ✅ Built and running on the server |
 | Live mode: always-on world, UI, continuous deploy | ✅ Built and running on the server (below) |
-| Trained dedup classifier | ⏳ Not built: dedup still uses the rule-based stand-in |
+| Trained dedup classifier | ✅ Live: logistic regression on 18 pair features; wrong merges 1,806 → 27 on held-out pairs, end to end misses 4.73% → 1.80% and duplicates 2.74% → 0% ([ML.md](ML.md)) |
 | Formal load-test harness (step-load runs, DESIGN.md §7) | ⏳ Not built as a separate suite; pushing live mode's speed and volume controls found a real bug (below) |
 
 ## Live mode (try it yourself)

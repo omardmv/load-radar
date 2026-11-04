@@ -10,6 +10,7 @@ import { loadUsers } from './data/users.ts';
 import { loadGazetteer } from './normalize/gazetteer.ts';
 import { createNormalizer } from './normalize/normalize.ts';
 import { createDedup } from './dedup/dedup.ts';
+import { loadClassifier } from './dedup/classifier.ts';
 import { buildMatcher } from './match/matcher.ts';
 import { createHeat } from './plan/heat.ts';
 import { allocate, buildPlan } from './plan/planner.ts';
@@ -19,7 +20,7 @@ import { createAlertQueue } from './alerts/alert-queue.ts';
 import { createNotifier } from './alerts/notifier.ts';
 import { setupObs } from './obs/obs.ts';
 
-export type EngineConfig = { dataDir?: string; users?: User[]; boardsUrl: string; telegramUrl: string; clock: Clock; budgetPerMin: number; connectionsPerBoard: number; metricsPort: number | null; otlpEndpoint: string | null; sampleRate: number; maxUsers: number; bots: number };
+export type EngineConfig = { dataDir?: string; users?: User[]; boardsUrl: string; telegramUrl: string; clock: Clock; budgetPerMin: number; connectionsPerBoard: number; metricsPort: number | null; otlpEndpoint: string | null; sampleRate: number; maxUsers: number; bots: number; dedupModel?: string | null };
 export type EngineSummary = { polls: number; postings: number; newLoads: number; alertsQueued: number; alertsSent: number; alertsDropped: number; scheduler: SchedulerStats };
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,7 +33,8 @@ export async function startEngine(cfg: EngineConfig) {
   const users = cfg.maxUsers > 0 ? all.slice(0, cfg.maxUsers) : all;
   const obs = setupObs({ sampleRate: cfg.sampleRate, otlpEndpoint: cfg.otlpEndpoint, metricsPort: cfg.metricsPort });
   const normalize = createNormalizer(loadGazetteer(join(here, '../sim/data')));
-  const dedup = createDedup(clock);
+  // Same-load decision: the trained classifier if a model file is given (ml/dedup), else the hand-written rule.
+  const dedup = createDedup(clock, cfg.dedupModel ? loadClassifier(cfg.dedupModel).sameLoad : undefined);
   let matcher = buildMatcher(users.flatMap((u) => u.searches));
   const heat = createHeat(clock);
   const alertQueue = createAlertQueue({ clock, freshAfterMs: 10_000, deadlineMs: 10 * 60_000, ttlMs: 72 * 3_600_000 });
@@ -196,11 +198,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     data: { type: 'string', default: 'out' }, boards: { type: 'string', default: 'http://127.0.0.1:7001' }, telegram: { type: 'string', default: 'http://127.0.0.1:7002' },
     'sim-start': { type: 'string' }, 'real-start': { type: 'string' }, speed: { type: 'string', default: '1' }, budget: { type: 'string', default: '60' },
     connections: { type: 'string', default: '64' }, 'metrics-port': { type: 'string', default: '9464' }, otlp: { type: 'string', default: 'off' },
-    sample: { type: 'string', default: '0.01' }, users: { type: 'string', default: '0' }, bots: { type: 'string', default: '4' } } });
+    sample: { type: 'string', default: '0.01' }, users: { type: 'string', default: '0' }, bots: { type: 'string', default: '4' }, 'dedup-model': { type: 'string', default: '' } } });
   const clock = createSimClock({ simStart: Date.parse(a['sim-start']!), realStart: Number(a['real-start']), speed: Number(a.speed) });
   const engine = await startEngine({ dataDir: a.data!, boardsUrl: a.boards!, telegramUrl: a.telegram!, clock, budgetPerMin: Number(a.budget),
     connectionsPerBoard: Number(a.connections), metricsPort: Number(a['metrics-port']) || null, otlpEndpoint: a.otlp === 'off' ? null : a.otlp!,
-    sampleRate: Number(a.sample), maxUsers: Number(a.users), bots: Number(a.bots) });
+    sampleRate: Number(a.sample), maxUsers: Number(a.users), bots: Number(a.bots), dedupModel: a['dedup-model'] || null });
   console.log('engine started');
   const stop = async () => { console.log(`ENGINE_SUMMARY ${JSON.stringify(await engine.stop())}`); process.exit(0); };
   process.on('SIGTERM', stop);

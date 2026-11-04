@@ -289,11 +289,11 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 - [x] Engine core for the benchmark (normalize, dedup with a simple rule, matcher, alerts) + observability overhead test
 - [x] `docker compose`: OTel Collector, Tempo, Loki, Prometheus, Grafana, GLiNER2, Ollama, Langfuse (self-hosted); runs continuously on the dev server, deployed by cron (DEPLOY.md), not just started locally
 - [x] Board simulator (budgets, 429s, bans, covered loads) and Telegram simulator
-- [x] Scheduler + pollers, normalizer, dedup (rule; classifier on Day 2), matcher, alert queue, notifier
+- [x] Scheduler + pollers, normalizer, dedup (rule on Day 1; trained classifier since Day 2), matcher, alert queue, notifier
 - [x] Observability on every stage (lite metrics, own 1% sampling, 1 span per posting) and an end-to-end scored run (README "First end-to-end result")
 
 **Day 2: AI/ML and measurement** (focus: AI/ML + backend/infra)
-- [ ] Same-load classifier trained on generator pairs: precision/recall, threshold choice, measured effect on misses and duplicates
+- [x] Same-load classifier trained on generator pairs: precision/recall, threshold choice, measured effect on misses and duplicates ([ML.md](ML.md), [ml/dedup/RESULTS.md](ml/dedup/RESULTS.md))
 - [x] Search parser (rules + GLiNER2 / Qwen fallback), 40-example eval set, five contenders compared (ml/parser/RESULTS.md); one known disambiguation bug left open (README "Known issues")
 - [x] LLM observability: OpenTelemetry GenAI spans → self-hosted Langfuse + Tempo (traces) + Loki (logs) + Prometheus span metrics; eval scores attached to each call (OBSERVABILITY.md §8b)
 - [x] Grafana dashboard (`ops/grafana/dashboards/load-radar.json`, provisioned as code) and scorer (batch + the live, rolling version in `live/score.ts`)
