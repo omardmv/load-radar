@@ -1,0 +1,76 @@
+# SLIs, error budgets and burn-rate alerts for the SLOs in SLO.md.
+# Window: rolling 1 h (the live world restarts on deploy; a real service would use 28-30 days, same math).
+# Burn rate = bad share / allowed bad share. 1 = budget spent exactly over the window; 10 = an hour's budget in 6 min.
+groups:
+  - name: slo-sli
+    interval: 15s
+    rules:
+      # SLO 1: 99% of alerts within 60 s (simulated) of posting.
+      - record: slo:alert_fast:ratio_rate5m
+        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le="60"}[5m])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[5m]))
+      - record: slo:alert_fast:ratio_rate1m
+        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le="60"}[1m])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[1m]))
+      - record: slo:alert_fast:ratio_rate1h
+        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le="60"}[1h])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[1h]))
+
+      # SLO 2: 99% of matching loads that stay on the board 5+ min get an alert.
+      - record: slo:alert_complete:ratio_rate5m
+        expr: sum(rate(answer_key_settled_total{outcome="delivered"}[5m])) / sum(rate(answer_key_settled_total{outcome=~"delivered|missed_open"}[5m]))
+      - record: slo:alert_complete:ratio_rate1m
+        expr: sum(rate(answer_key_settled_total{outcome="delivered"}[1m])) / sum(rate(answer_key_settled_total{outcome=~"delivered|missed_open"}[1m]))
+      - record: slo:alert_complete:ratio_rate1h
+        expr: sum(rate(answer_key_settled_total{outcome="delivered"}[1h])) / sum(rate(answer_key_settled_total{outcome=~"delivered|missed_open"}[1h]))
+
+      # SLO 3: under 1% of board requests answered 429; 0 banned logins.
+      - record: slo:board_not_limited:ratio_rate5m
+        expr: 1 - (sum(rate(upstream_requests_total{job="load-radar-engine",status="429"}[5m])) or vector(0)) / sum(rate(upstream_requests_total{job="load-radar-engine"}[5m]))
+      - record: slo:board_not_limited:ratio_rate1h
+        expr: 1 - (sum(rate(upstream_requests_total{job="load-radar-engine",status="429"}[1h])) or vector(0)) / sum(rate(upstream_requests_total{job="load-radar-engine"}[1h]))
+      - record: slo:logins_banned
+        expr: max(engine_gauge{job="load-radar-engine",name="logins_banned"})
+
+  - name: slo-budget
+    interval: 15s
+    rules:
+      # burn rate per window; budget left over the last hour (1 = untouched, 0 = spent, negative = overspent)
+      - record: slo:alert_fast:burnrate5m
+        expr: (1 - slo:alert_fast:ratio_rate5m) / 0.01
+      - record: slo:alert_fast:burnrate1m
+        expr: (1 - slo:alert_fast:ratio_rate1m) / 0.01
+      - record: slo:alert_fast:budget_left1h
+        expr: 1 - (1 - slo:alert_fast:ratio_rate1h) / 0.01
+      - record: slo:alert_complete:burnrate5m
+        expr: (1 - slo:alert_complete:ratio_rate5m) / 0.01
+      - record: slo:alert_complete:burnrate1m
+        expr: (1 - slo:alert_complete:ratio_rate1m) / 0.01
+      - record: slo:alert_complete:budget_left1h
+        expr: 1 - (1 - slo:alert_complete:ratio_rate1h) / 0.01
+      - record: slo:board_not_limited:budget_left1h
+        expr: 1 - (1 - slo:board_not_limited:ratio_rate1h) / 0.01
+
+  - name: slo-alerts
+    rules:
+      # Multiwindow fast burn (SRE workbook, scaled to a 1 h window): 5 min says it's serious, 1 min says it's still happening.
+      - alert: AlertLatencyBudgetFastBurn
+        expr: slo:alert_fast:burnrate5m > 10 and slo:alert_fast:burnrate1m > 10
+        for: 1m
+        labels: { severity: page, slo: alert-fast }
+        annotations:
+          summary: "Alerts are slow: over 10% slower than 60 s; the hour's error budget goes in under 6 minutes."
+      - alert: AlertCompletenessBudgetFastBurn
+        expr: slo:alert_complete:burnrate5m > 10 and slo:alert_complete:burnrate1m > 10
+        for: 1m
+        labels: { severity: page, slo: alert-complete }
+        annotations:
+          summary: "Loads are being missed: over 10% of matching loads that stayed 5+ min got no alert."
+      - alert: BoardLoginBanned
+        expr: slo:logins_banned > 0
+        labels: { severity: page, slo: board-friendly }
+        annotations:
+          summary: "{{ $value }} board logins are banned. Customers on those logins get nothing until the board reinstates them."
+      - alert: BoardRateLimitedTooOften
+        expr: (1 - slo:board_not_limited:ratio_rate5m) > 0.05
+        for: 2m
+        labels: { severity: ticket, slo: board-friendly }
+        annotations:
+          summary: "Over 5% of board requests answered 429: the scheduler is asking faster than the boards allow."

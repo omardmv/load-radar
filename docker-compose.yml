@@ -64,7 +64,7 @@ services:
     restart: unless-stopped
     image: prom/prometheus:latest
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--enable-feature=exemplar-storage"]
-    volumes: ["./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    volumes: ["./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro", "./ops/prometheus-rules.yml:/etc/prometheus/rules.yml:ro"]
     ports: ["127.0.0.1:9090:9090"]
   grafana:
     restart: unless-stopped

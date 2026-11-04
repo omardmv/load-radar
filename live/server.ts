@@ -9,6 +9,7 @@ import { dirname, extname, join, normalize as normPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { SpanKind, SpanStatusCode, type Span } from '@opentelemetry/api';
+import client from 'prom-client';
 import { createAdjustableClock } from '../src/shared/clock.ts';
 import { BOARDS, type SearchSpec, type User, type Equip } from '../src/shared/types.ts';
 import { toUser } from '../src/data/users.ts';
@@ -87,7 +88,30 @@ const engine = await startEngine({ users, boardsUrl: 'http://127.0.0.1:7001', te
   connectionsPerBoard: 64, metricsPort: Number(a['metrics-port']) || null, otlpEndpoint: a.otlp === 'off' ? null : a.otlp!, sampleRate: 0.01, maxUsers: 0, bots: 4 });
 
 setInterval(() => { stream.tick(); if (postingBatch.length) { send('postings', postingBatch.slice(-12)); postingBatch = []; } }, 250);
-setInterval(() => { score.sweep(clock.now()); stream.prune(); }, 5_000);
+setInterval(() => { score.sweep(clock.now()); stream.prune(); exportScore(); }, 5_000);
+
+// ---------- answer-key metrics for the SLOs (SLO.md), scraped by Prometheus at live:8080/metrics ----------
+// The live scorer keeps totals; Prometheus wants counters, so each sweep adds the change since the last one.
+const reg = new client.Registry();
+const settled = new client.Counter({ name: 'answer_key_settled_total', registers: [reg], labelNames: ['outcome'],
+  help: 'expected alerts that settled: delivered, missed_open (load stayed 5+ min: our fault), missed_quick (taken within 5 min)' });
+const other = new client.Counter({ name: 'answer_key_other_total', registers: [reg], labelNames: ['kind'],
+  help: 'deliveries outside the answer key: late (after the 15 min cutoff), duplicate, unexpected, backfill' });
+new client.Gauge({ name: 'answer_key_pending', registers: [reg], help: 'expected alerts not settled yet', collect() { this.set(score.summary().pending); } });
+let last = { delivered: 0, missedOpen: 0, missedQuick: 0, late: 0, duplicates: 0, unexpected: 0, backfill: 0 };
+function exportScore() {
+  const a = score.summary().all;
+  const now = { delivered: a.delivered, missedOpen: a.missedOpen5Min, missedQuick: a.missed - a.missedOpen5Min, late: a.late, duplicates: a.duplicates, unexpected: a.unexpected, backfill: a.backfill };
+  const inc = (c: client.Counter<string>, label: Record<string, string>, d: number) => { if (d > 0) c.inc(label, d); };
+  inc(settled, { outcome: 'delivered' }, now.delivered - last.delivered);
+  inc(settled, { outcome: 'missed_open' }, now.missedOpen - last.missedOpen);
+  inc(settled, { outcome: 'missed_quick' }, now.missedQuick - last.missedQuick);
+  inc(other, { kind: 'late' }, now.late - last.late);
+  inc(other, { kind: 'duplicate' }, now.duplicates - last.duplicates);
+  inc(other, { kind: 'unexpected' }, now.unexpected - last.unexpected);
+  inc(other, { kind: 'backfill' }, now.backfill - last.backfill);
+  last = now;
+}
 const snapshot = () => ({ seed, now: clock.now(), speed: clock.speed, loadsPerDay: stream.loadsPerDay, users: users.length,
   searches: users.reduce((n, u) => n + u.searches.length, 0), world: { ...stream.stats, scheduled: stream.pending() }, boards: boards.stats,
   engine: engine.counts(), score: score.summary() });
@@ -134,6 +158,7 @@ createServer((req, res) => {
 
 async function handle(req: IncomingMessage, res: ServerResponse, url: URL, reqSpan: Span | null) {
   try {
+    if (url.pathname === '/metrics') { res.writeHead(200, { 'content-type': reg.contentType }); res.end(await reg.metrics()); return; }
     if (url.pathname === '/api/state') return json(res, 200, { ...snapshot(), you: saved, postings: recentPostings, alerts: recentAlerts });
     if (url.pathname === '/api/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });

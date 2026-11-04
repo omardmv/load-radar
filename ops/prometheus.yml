@@ -1,9 +1,14 @@
 global:
   scrape_interval: 5s
+  evaluation_interval: 15s
+rule_files: [/etc/prometheus/rules.yml]   # SLIs, error budgets, burn-rate alerts (SLO.md)
 scrape_configs:
   - job_name: load-radar-engine
     static_configs:
       - targets: ["live:9464", "app:9464"]
+  - job_name: load-radar-live          # answer-key counters for the SLOs
+    static_configs:
+      - targets: ["live:8080"]
   - job_name: otel-collector-llm
     static_configs:
       - targets: ["otel-collector:8889"]

@@ -15,7 +15,7 @@
  "panels": [
   {
    "type": "row",
-   "title": "Right now",
+   "title": "SLOs (last hour, see SLO.md)",
    "id": 1,
    "collapsed": false,
    "gridPos": {
@@ -27,8 +27,8 @@
   },
   {
    "type": "stat",
-   "title": "Board requests / s",
-   "description": "Requests the engine sends to load boards (all logins).",
+   "title": "Alerts within 60 s",
+   "description": "SLO 1 target 99%. Share of alerts sent within 60 simulated seconds of posting.",
    "id": 2,
    "datasource": {
     "type": "prometheus",
@@ -39,6 +39,434 @@
     "w": 4,
     "x": 0,
     "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:alert_fast:ratio_rate1h"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Budget left: speed",
+   "description": "Share of the hour's error budget for SLO 1 not yet spent. Below 0 = overspent.",
+   "id": 3,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.25
+       },
+       {
+        "color": "green",
+        "value": 0.5
+       }
+      ]
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:alert_fast:budget_left1h"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Loads alerted (open 5+ min)",
+   "description": "SLO 2 target 99%. Matching loads that stayed on the board 5+ minutes and got an alert.",
+   "id": 4,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:alert_complete:ratio_rate1h"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Budget left: completeness",
+   "description": "Share of the hour's error budget for SLO 2 not yet spent.",
+   "id": 5,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 12,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.25
+       },
+       {
+        "color": "green",
+        "value": 0.5
+       }
+      ]
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:alert_complete:budget_left1h"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Board requests not 429",
+   "description": "SLO 3 target 99%.",
+   "id": 6,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 16,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:board_not_limited:ratio_rate1h"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Logins banned",
+   "description": "SLO 3: must be 0.",
+   "id": 7,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 20,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "graphMode": "none",
+    "colorMode": "value"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:logins_banned"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Burn rate (1 = spending the budget exactly on schedule; above 10 pages)",
+   "description": "Bad share divided by allowed bad share, 5-minute window.",
+   "id": 8,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 24,
+    "x": 0,
+    "y": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 2,
+      "stacking": {
+       "mode": "none"
+      },
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 10
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:alert_fast:burnrate5m",
+     "legendFormat": "speed (SLO 1)",
+     "exemplar": true
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "slo:alert_complete:burnrate5m",
+     "legendFormat": "completeness (SLO 2)",
+     "exemplar": true
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(1 - slo:board_not_limited:ratio_rate5m) / 0.01",
+     "legendFormat": "429s (SLO 3)",
+     "exemplar": true
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "title": "Right now",
+   "id": 9,
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 12
+   }
+  },
+  {
+   "type": "stat",
+   "title": "Board requests / s",
+   "description": "Requests the engine sends to load boards (all logins).",
+   "id": 10,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 13
    },
    "fieldConfig": {
     "defaults": {
@@ -79,7 +507,7 @@
    "type": "stat",
    "title": "Postings processed / s",
    "description": "Board postings through normalize \u2192 dedup \u2192 match \u2192 alert.",
-   "id": 3,
+   "id": 11,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -88,7 +516,7 @@
     "h": 4,
     "w": 4,
     "x": 4,
-    "y": 1
+    "y": 13
    },
    "fieldConfig": {
     "defaults": {
@@ -129,7 +557,7 @@
    "type": "stat",
    "title": "New real loads / s",
    "description": "Postings that dedup decided are a new load (not a refresh or copy).",
-   "id": 4,
+   "id": 12,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -138,7 +566,7 @@
     "h": 4,
     "w": 4,
     "x": 8,
-    "y": 1
+    "y": 13
    },
    "fieldConfig": {
     "defaults": {
@@ -179,7 +607,7 @@
    "type": "stat",
    "title": "Alerts sent / s",
    "description": "Telegram messages' alerts accepted.",
-   "id": 5,
+   "id": 13,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -188,7 +616,7 @@
     "h": 4,
     "w": 4,
     "x": 12,
-    "y": 1
+    "y": 13
    },
    "fieldConfig": {
     "defaults": {
@@ -229,7 +657,7 @@
    "type": "stat",
    "title": "Post \u2192 alert p95",
    "description": "Board posted_at to Telegram accepted, simulated seconds.",
-   "id": 6,
+   "id": 14,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -238,7 +666,7 @@
     "h": 4,
     "w": 4,
     "x": 16,
-    "y": 1
+    "y": 13
    },
    "fieldConfig": {
     "defaults": {
@@ -287,7 +715,7 @@
    "type": "stat",
    "title": "Logins banned",
    "description": "Board logins the engine considers suspended (403). Should be 0.",
-   "id": 7,
+   "id": 15,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -296,7 +724,7 @@
     "h": 4,
     "w": 4,
     "x": 20,
-    "y": 1
+    "y": 13
    },
    "fieldConfig": {
     "defaults": {
@@ -340,20 +768,20 @@
   {
    "type": "row",
    "title": "Throughput",
-   "id": 8,
+   "id": 16,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 5
+    "y": 17
    }
   },
   {
    "type": "timeseries",
    "title": "Board requests / s by status",
    "description": "200 = ok, 429 = rate limited, 403 = banned, 0 = timeout or network error.",
-   "id": 9,
+   "id": 17,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -362,7 +790,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 6
+    "y": 18
    },
    "fieldConfig": {
     "defaults": {
@@ -403,7 +831,7 @@
    "type": "timeseries",
    "title": "Postings, new loads and alerts / s",
    "description": "How much work flows through the pipeline.",
-   "id": 10,
+   "id": 18,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -412,7 +840,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 6
+    "y": 18
    },
    "fieldConfig": {
     "defaults": {
@@ -472,20 +900,20 @@
   {
    "type": "row",
    "title": "Latency",
-   "id": 11,
+   "id": 19,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 14
+    "y": 26
    }
   },
   {
    "type": "timeseries",
    "title": "Post \u2192 alert (simulated seconds)",
    "description": "From the board's posted_at to Telegram accepting the alert. Click an exemplar dot to open its trace.",
-   "id": 12,
+   "id": 20,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -494,7 +922,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 15
+    "y": 27
    },
    "fieldConfig": {
     "defaults": {
@@ -555,7 +983,7 @@
    "type": "timeseries",
    "title": "Board request time p95",
    "description": "Board response time, without waiting for a free connection.",
-   "id": 13,
+   "id": 21,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -564,7 +992,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 15
+    "y": 27
    },
    "fieldConfig": {
     "defaults": {
@@ -605,7 +1033,7 @@
    "type": "timeseries",
    "title": "Stage time p99 (per posting)",
    "description": "CPU time in each in-memory stage (1 in 16 postings timed).",
-   "id": 14,
+   "id": 22,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -614,7 +1042,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 15
+    "y": 27
    },
    "fieldConfig": {
     "defaults": {
@@ -654,20 +1082,20 @@
   {
    "type": "row",
    "title": "Health",
-   "id": 15,
+   "id": 23,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 23
+    "y": 35
    }
   },
   {
    "type": "timeseries",
    "title": "Queues",
    "description": "Work waiting inside the engine. Growing = falling behind.",
-   "id": 16,
+   "id": 24,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -676,7 +1104,7 @@
     "h": 8,
     "w": 8,
     "x": 0,
-    "y": 24
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -717,7 +1145,7 @@
    "type": "timeseries",
    "title": "Logins paused / banned",
    "description": "Paused = backing off after 429s. Banned = board suspended the login (403).",
-   "id": 17,
+   "id": 25,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -726,7 +1154,7 @@
     "h": 8,
     "w": 8,
     "x": 8,
-    "y": 24
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -767,7 +1195,7 @@
    "type": "timeseries",
    "title": "Dropped and failed",
    "description": "Alerts dropped as stale (older than 10 min), postings the normalizer couldn't read, spans dropped.",
-   "id": 18,
+   "id": 26,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -776,7 +1204,7 @@
     "h": 8,
     "w": 8,
     "x": 16,
-    "y": 24
+    "y": 36
    },
    "fieldConfig": {
     "defaults": {
@@ -836,20 +1264,20 @@
   {
    "type": "row",
    "title": "Models (search parser)",
-   "id": 19,
+   "id": 27,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 32
+    "y": 44
    }
   },
   {
    "type": "timeseries",
    "title": "Model calls / s",
    "description": "Every GLiNER2 / Qwen call, from the GenAI spans (collector spanmetrics).",
-   "id": 20,
+   "id": 28,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -858,7 +1286,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 33
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -899,7 +1327,7 @@
    "type": "timeseries",
    "title": "Model call latency p95",
    "description": "Per model.",
-   "id": 21,
+   "id": 29,
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -908,7 +1336,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 33
+    "y": 45
    },
    "fieldConfig": {
     "defaults": {
@@ -948,19 +1376,19 @@
   {
    "type": "row",
    "title": "Requests: traces and logs",
-   "id": 22,
+   "id": 30,
    "collapsed": false,
    "gridPos": {
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 41
+    "y": 53
    }
   },
   {
    "type": "table",
    "title": "Recent API requests (click a trace id for its timeline)",
-   "id": 23,
+   "id": 31,
    "datasource": {
     "type": "tempo",
     "uid": "tempo"
@@ -969,7 +1397,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 42
+    "y": 54
    },
    "targets": [
     {
@@ -988,7 +1416,7 @@
   {
    "type": "logs",
    "title": "Live service logs",
-   "id": 24,
+   "id": 32,
    "datasource": {
     "type": "loki",
     "uid": "loki"
@@ -997,7 +1425,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 42
+    "y": 54
    },
    "options": {
     "showTime": true,
