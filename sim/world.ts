@@ -155,6 +155,12 @@ export function createWorld(seed: number) {
     }
     return k;
   }
+  // The lane's typical $/mile without the per-load noise: what a rate index (DAT RateView, Greenscreens) would report.
+  // Used by the agent's market-rate tool. k = the same calibration rateScale() computes.
+  function expectedRpm(originMarket: string, e: Equip, miles: number, k: Record<Equip, number>): number {
+    const f = marketRateFactor.get(originMarket) ?? 1;
+    return Math.round(BASE_RPM[e] * f * (1 + 0.5 * Math.exp(-Math.max(miles, 30) / 400)) * k[e] * 100) / 100;
+  }
   function finishRate(l: Load, k: Record<Equip, number>) {
     if (chance(NO_RATE)) l.rate = null;
     else if (l.rate !== null) l.rate = Math.max(300, Math.round((l.rate * k[l.equip]) / 25) * 25); // short-haul minimum
@@ -275,6 +281,6 @@ export function createWorld(seed: number) {
     return user;
   }
 
-  return { rand, makeLoad, siblings, burstPicker, rateScale, finishRate, postingsFor, makeUser, pickHourOfDay, alphas, searchCount: () => searchCount };
+  return { rand, makeLoad, siblings, burstPicker, rateScale, finishRate, expectedRpm, postingsFor, makeUser, pickHourOfDay, alphas, searchCount: () => searchCount };
 }
 export type World = ReturnType<typeof createWorld>;

@@ -1,6 +1,7 @@
 # One OTLP input:
 #   traces        everything            -> Tempo (Grafana: Explore, Traces Drilldown)
-#   traces/genai  only LLM/model calls  -> Langfuse (prompt, output, tokens) + span metrics for Prometheus
+#   traces/genai  GenAI spans (model calls, agent runs, tool calls) -> Langfuse
+#   traces/llm    model calls only      -> span metrics for Prometheus (llm_calls_total, llm_duration_*)
 #   logs          structured app logs   -> Loki (Grafana: Logs Drilldown), each line carries its trace_id
 receivers:
   otlp:
@@ -10,8 +11,14 @@ receivers:
 
 processors:
   batch: {}
-  # Keep only GenAI spans (OpenTelemetry GenAI conventions): drop anything without a model attribute.
+  # GenAI spans (OpenTelemetry GenAI conventions) for Langfuse: model calls, agent runs, tool calls.
   filter/genai:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["gen_ai.request.model"] == nil and attributes["gen_ai.operation.name"] == nil'
+  # Only real model calls become llm_calls_total / llm_duration metrics.
+  filter/llm:
     error_mode: ignore
     traces:
       span:
@@ -53,7 +60,11 @@ service:
     traces/genai:
       receivers: [otlp]
       processors: [filter/genai, batch]
-      exporters: [otlphttp/langfuse, spanmetrics]
+      exporters: [otlphttp/langfuse]
+    traces/llm:
+      receivers: [otlp]
+      processors: [filter/llm, batch]
+      exporters: [spanmetrics]
     metrics/llm:
       receivers: [spanmetrics]
       exporters: [prometheus]
