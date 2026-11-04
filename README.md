@@ -22,7 +22,7 @@ The focus is on **backend/infrastructure** (scale, overload, observability) and 
 - **SLOs at 1×** (alerts within 60 s, matching loads alerted, no bans): all met. Up to 2,000 dispatchers on one engine thread; the speed SLO breaks at 5,000 ([SLO.md](SLO.md)).
 - **Dedup classifier**: wrong merges 1,806 → 27 on held-out pairs; end to end, missed alerts 4.73% → 1.80% and duplicates 2.74% → 0% ([ML.md](ML.md)).
 - **Search parser**: 98% of test searches fully right with rules + GLiNER2 ([ml/parser/RESULTS.md](ml/parser/RESULTS.md)).
-- **Load-decision agent**: a small model doing the whole decision is right 29–50% of the time; the same model only reading the comments, with code deciding, is right 94% on messy real-world wording vs 56% for keywords (first results; the full comparison across model sizes is running, [ml/agent/](ml/agent/)).
+- **Load-decision agent**: a model doing the whole decision is right 21–42% of the time, and 7B is no better than 1.5B; the same models only reading the comments, with code deciding, are right 94–100% on messy real-world wording vs 56% for keywords, in 2–8 s on CPU ([ML.md](ML.md) §3, [ml/agent/RESULTS.md](ml/agent/RESULTS.md)).
 
 The rest of this page is a plain-language guide: the problem, why it's built this way, what every term means, how it grows to 1000×. The detailed documents are listed at the end.
 

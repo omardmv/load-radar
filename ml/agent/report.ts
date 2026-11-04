@@ -9,10 +9,10 @@ type Row = { runId: string; set?: string; model: string; mode: string; prompt?: 
   grade: { verdict: boolean; target: boolean; grounded: boolean; valid: boolean; requirements?: boolean | null }; modelCalls: number; ms: number; tokens: [number, number] };
 const rows: Row[] = readFileSync(join(here, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const latest = new Map<string, string>();
-for (const r of rows) { const k = `${r.set ?? 'main'}|${r.model}|${r.mode}${r.mode === 'hybrid' ? ` ${r.prompt ?? 'v1'}` : ''}`; if (!latest.has(k) || r.runId > latest.get(k)!) latest.set(k, r.runId); }
+for (const r of rows) { const k = `${r.set ?? 'main'}|${r.mode === 'rules' ? '—' : r.model}|${r.mode}${r.mode === 'hybrid' ? ` ${r.prompt ?? 'v1'}` : ''}`; if (!latest.has(k) || r.runId > latest.get(k)!) latest.set(k, r.runId); }
 const groups = new Map<string, Row[]>();
 for (const r of rows) {
-  const k = `${r.set ?? 'main'}|${r.model}|${r.mode}${r.mode === 'hybrid' ? ` ${r.prompt ?? 'v1'}` : ''}`;
+  const k = `${r.set ?? 'main'}|${r.mode === 'rules' ? '—' : r.model}|${r.mode}${r.mode === 'hybrid' ? ` ${r.prompt ?? 'v1'}` : ''}`;
   if (latest.get(k) !== r.runId) continue;
   if (!groups.has(k)) groups.set(k, []);
   groups.get(k)!.push(r);

@@ -8,3 +8,4 @@ ui/dist/
 ui/node_modules/
 ml/dedup/data/
 out-eval/
+ml/agent/*.log

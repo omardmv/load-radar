@@ -2,16 +2,17 @@
 
 Every model in the system: what it decides, how it was trained, how well it does, where it runs, and what we don't
 know yet. Kept up to date as models change. Raw numbers: [ml/dedup/RESULTS.md](ml/dedup/RESULTS.md),
-[ml/parser/RESULTS.md](ml/parser/RESULTS.md).
+[ml/parser/RESULTS.md](ml/parser/RESULTS.md), [ml/agent/RESULTS.md](ml/agent/RESULTS.md).
 
 | Model | Decides | Where it runs | How often | Status |
 | --- | --- | --- | --- | --- |
 | **Same-load classifier** (logistic regression) | Are these two board postings the same real load? | Engine, hot path, every new posting with candidates | Thousands of pairs/s | **Live** (default since 2026-11-04) |
 | **GLiNER2** (`fastino/gliner2-base-v1`) | Which words in a typed search are the origin, destination, rate, deadhead; which equipment | `gliner2` container (CPU), called by the parser | Only when rules miss equipment or origin | Live |
 | Qwen 2.5 1.5B (Ollama) | Same as GLiNER2, as a chat model with a JSON schema | `ollama` container | Never in the live path | Eval only (slower and less accurate) |
+| **Qwen 2.5 3B** (Ollama), load-decision agent | What the broker's comments require (tarps, frozen, other); code then decides book / negotiate / ask / skip | `ollama` container (CPU) | When a dispatcher clicks "Should I take it?" | **Live** (hybrid mode, prompt v2) |
 
-Principle across all three: **cheap deterministic code first, a model only where the code can't decide, and every
-decision measured against an answer key** (the simulator's for dedup, a labeled eval set for the parser).
+Principle across all of them: **cheap deterministic code first, a model only where the code can't decide, and every
+decision measured against an answer key** (the simulator's for dedup, a labeled eval set for the parser and the agent).
 
 ---
 
@@ -152,10 +153,87 @@ springfield tmrw" sets Springfield as the destination too.
 Observability: every model call is a GenAI span (input, output, model, latency, tokens) in Langfuse and Tempo, counted
 in Prometheus (`llm_calls_total`, `llm_duration_*`); eval runs attach correctness scores to each call in Langfuse.
 
+## 3. Load-decision agent: "Should I take it?"
+
+### The problem
+
+An alert says a load matches. The dispatcher still has to decide: book it, counter-offer, ask the broker for the rate,
+or skip. That depends on numbers (rate per mile vs the market, deadhead, weight) and on the broker's free-text comments
+("8FT TARPS", "-10F FROZEN", "chilled 34F", "chains req"), which decide whether the truck can carry it at all.
+
+The dispatch policy is written down ([src/agent/policy.ts](src/agent/policy.ts)): skip on too much deadhead, too heavy,
+tarps or frozen the truck can't do; otherwise target = max(market rate, truck minimum); book at or above target,
+negotiate at 85% or more (counter rounded to $25), ask when there's no rate, skip below that.
+
+### Four designs, compared on the same cases
+
+| Mode | Who reads the comments | Who applies the policy |
+| --- | --- | --- |
+| **rules** | Keyword regexes | Code |
+| **hybrid** | The model (one call, JSON schema: `needs_tarps`, `needs_frozen`, `other_requirements`) | Code |
+| **context** | The model gets all facts in one prompt and decides everything | The model |
+| **tools** | The model calls `get_load`, `get_truck`, `get_market_rate`, `get_deadhead`, then decides | The model |
+
+The tool loop has guards: a repeated call returns a note instead of running again, and tools are removed once every
+fact is in, so a small model can't loop forever.
+
+### Eval sets and graders
+
+- **main** (24 cases, [ml/agent/cases.jsonl](ml/agent/cases.jsonl)): loads from the world model (seed 21), 6 per
+  verdict, 9 with comment traps (chilled vs frozen, chains vs tarps, "NO TARP").
+- **messy** (16 cases, [ml/agent/messy_comments.json](ml/agent/messy_comments.json)): real-world phrasings of tarp and
+  frozen requirements, labeled by hand, where the comment alone decides the verdict. The keyword rule reads 9 of 16.
+- Graders are deterministic, no LLM judge: verdict right; target rate within $50; **grounded** (every number in the
+  reasons appears in the facts); valid JSON; comments read right. Every case is a trace in Langfuse with scores
+  attached (`agent_verdict_correct`, `agent_grounded`).
+
+### Results (server CPU, temperature 0)
+
+| Design | Model | main verdict | messy verdict | p50 latency |
+| --- | --- | --- | --- | --- |
+| rules | — | 100% | **56%** | 0 s |
+| context | 1.5B / 3B / 7B | 29% / 42% / 33% | — | 35–90 s |
+| tools | 1.5B / 3B / 7B | 38% / 21% / 25% | — | 89–172 s |
+| hybrid, prompt v1 | 1.5B / 3B / 7B | 83% / 83% / 92% | 94% / 100% / 100% | 3–10 s |
+| hybrid, prompt v2 | 1.5B / 3B / 7B | 96% / 88% / 100% | 94% / 100% / 100% | 2–8 s |
+
+Full table (target, grounded, tokens, p95): [ml/agent/RESULTS.md](ml/agent/RESULTS.md).
+
+What it means:
+
+1. **Letting the model do the arithmetic and the policy fails, and a bigger model doesn't fix it.** 7B whole-decision
+   is 25–33%, no better than 1.5B. The misses are policy errors (wrong threshold, "negotiate" when it should book,
+   invented counter-offers), not missing facts. Tools make it slower (3 calls, 2,200 tokens in) without helping.
+2. **The split works**: the model does only what code can't (read free text), code does what models are bad at
+   (compare numbers, apply rules). Same 1.5B model: 29–38% → 94–96%, and 30× faster.
+3. **Keywords are perfect on the cases they were written for and fail on real wording** (56% on messy). The model
+   reads "tarped load", "reefer @ -10", "keep frozen" correctly.
+4. **Prompt v1 → v2**: v1's misses on main were chilled loads (28F, 34F) read as frozen and chains read as tarps. v2
+   adds exact thresholds and four examples. Caveat: v2 was written after looking at main's misses, so main is no
+   longer a blind test for v2; messy wasn't used and didn't change (94% / 100% / 100%).
+
+### Which model runs live
+
+**3B, hybrid, prompt v2.** It's 100% on the blind messy set (1.5B misses one), ~3 s at p50 on the server's CPU, and
+its 88% on main is 3 misses on a set that is no longer blind. 7B is 100% everywhere but ~8 s p50 and it competes
+with the live service for the same 4 cores. The UI shows both the model's reading of the comments and the policy
+verdict, so a dispatcher sees why.
+
+### Honest limits
+
+- 24 + 16 cases: one case is 4–6 points. Differences of one case between models are noise.
+- The cases come from our own world model, and the messy phrasings were written by us, not taken from real boards.
+- p95 latency is high (14–29 s) because the eval shares the CPU with the live service and Ollama loads models on
+  demand.
+- The policy itself is ours. A real dispatcher's policy has more inputs (lane preferences, broker reputation,
+  hours of service).
+
 ---
 
 ## Changelog
 
+- **2026-11-04** Load-decision agent: four designs evaluated; hybrid (model reads comments, code decides) with prompt v2
+  and Qwen 2.5 3B is live.
 - **2026-11-04** Same-load classifier trained and made the default in live mode. Normalizer keeps weight and comments.
   Rule kept as the fallback (`--dedup-model` unset).
 - **2026-11-03** Search parser: rules + GLiNER2 hybrid live; Qwen evaluated and kept out of the live path.
