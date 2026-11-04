@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { setupLlmTracing } from '../../src/obs/llm.ts';
-import { runAgent, type AgentMode, type AgentRun } from '../../src/agent/agent.ts';
+import { runAgent, REQ_PROMPT_VERSION, type AgentMode, type AgentRun } from '../../src/agent/agent.ts';
 import type { Decision, Facts } from '../../src/agent/policy.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -71,7 +71,7 @@ for (const model of a.models!.split(',')) for (const mode of a.modes!.split(',')
     const r = await runAgent({ url: a.ollama!, model, mode, facts: c.facts, tracer: tracing.tracer, sessionId: `agent-eval-${runId}-${model}-${mode}`, metadata: { case: c.id } });
     const g = grade(c, r);
     rows.push({ c, r, g });
-    appendFileSync(join(here, 'runs.jsonl'), JSON.stringify({ runId, set, model, mode, case: c.id, requirements: r.requirements, expected: c.expected, decision: r.decision, error: r.error, grade: g, modelCalls: r.modelCalls, tools: r.toolCalls, ms: Math.round(r.latencyMs), tokens: [r.inputTokens, r.outputTokens], traceId: r.traceId }) + '\n');
+    appendFileSync(join(here, 'runs.jsonl'), JSON.stringify({ runId, set, model, mode, prompt: mode === 'hybrid' ? REQ_PROMPT_VERSION : undefined, case: c.id, requirements: r.requirements, expected: c.expected, decision: r.decision, error: r.error, grade: g, modelCalls: r.modelCalls, tools: r.toolCalls, ms: Math.round(r.latencyMs), tokens: [r.inputTokens, r.outputTokens], traceId: r.traceId }) + '\n');
     await score(r.traceId, 'agent_verdict_correct', g.verdict ? 1 : 0);
     await score(r.traceId, 'agent_grounded', g.grounded ? 1 : 0);
     console.error(`${set} ${model} ${mode} ${c.id}: ${r.decision?.verdict ?? r.error} (want ${c.expected.verdict}) ${g.verdict ? 'ok' : 'WRONG'}${g.invented.length ? ` invented ${g.invented}` : ''} ${(r.latencyMs / 1000).toFixed(1)}s`);

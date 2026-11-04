@@ -32,10 +32,24 @@ const REQ_SCHEMA = {
   properties: { needs_tarps: { type: 'boolean' }, needs_frozen: { type: 'boolean' }, other_requirements: { type: 'array', items: { type: 'string' }, maxItems: 3 } },
   required: ['needs_tarps', 'needs_frozen', 'other_requirements'],
 };
+// v1 (2026-11-04): definitions only. v2: precise thresholds and worked examples, after v1 flagged chilled loads as
+// frozen and chains as tarps (ML.md). Bump the version whenever the prompt changes; evals record it.
+export const REQ_PROMPT_VERSION = 'v2';
 const REQ_SYSTEM = `You read a freight broker's comments on a truckload and say what the truck must have.
-needs_tarps: true only if the load must be covered with tarps (e.g. "TARPS REQUIRED", "8FT TARPS", "must be tarped"). False if tarps are not needed ("NO TARP", "tarps not required") or not mentioned.
-needs_frozen: true only if the load must be kept frozen, at or below about 0 F (e.g. "-10F FROZEN", "deep frozen", "keep at -20"). Chilled loads (e.g. "34F", "36F produce") are NOT frozen.
-other_requirements: up to 3 other things the driver must have or do (e.g. "chains", "load bars", "lumper at delivery"), short.
+
+needs_tarps: true ONLY if the comments say the load must be covered with tarps: "TARPS REQUIRED", "8FT TARPS", "6FT TARPS", "must be tarped", "tarping req'd", "driver to tarp".
+  false if the comments say tarps are not needed ("NO TARP", "tarps not required", "tarps optional") or never mention tarps.
+  Chains, straps, coil racks, load bars and dunnage are NOT tarps.
+needs_frozen: true ONLY if the load must be kept frozen: a temperature of 0 F or below (for example "-10F", "-20F", "0 degrees", "set unit to -5"), or the words "frozen" / "FRZN" / "deep frozen" describing the load.
+  false for chilled or refrigerated loads above 0 F (for example "34F", "35F", "28F", "36-38F produce", "DAIRY 35F", "MEAT 28F"), for "do NOT freeze", and when no temperature is mentioned.
+  Food-safety or paperwork notes ("FSMA COMPLIANT", "PULP REQ", "NET 30") say nothing about frozen.
+other_requirements: up to 3 other things the driver must have or do (for example "chains", "load bars", "lumper at delivery"), short.
+
+Examples:
+"STRAPS AND CHAINS / QUICK PAY 2%" -> {"needs_tarps": false, "needs_frozen": false, "other_requirements": ["straps and chains"]}
+"MEAT 28F" -> {"needs_tarps": false, "needs_frozen": false, "other_requirements": ["keep at 28F"]}
+"-10F FROZEN" -> {"needs_tarps": false, "needs_frozen": true, "other_requirements": []}
+"8FT TARPS / NET 30" -> {"needs_tarps": true, "needs_frozen": false, "other_requirements": []}
 Answer JSON only.`;
 const SYSTEM = `You help a truck dispatcher decide about one load for one truck. Use only facts from your tools; never invent numbers.
 ${POLICY_TEXT}

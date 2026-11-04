@@ -5,21 +5,21 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-type Row = { runId: string; set?: string; model: string; mode: string; case: string; expected: { verdict: string }; decision: { verdict: string } | null;
+type Row = { runId: string; set?: string; model: string; mode: string; prompt?: string; case: string; expected: { verdict: string }; decision: { verdict: string } | null;
   grade: { verdict: boolean; target: boolean; grounded: boolean; valid: boolean; requirements?: boolean | null }; modelCalls: number; ms: number; tokens: [number, number] };
 const rows: Row[] = readFileSync(join(here, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const latest = new Map<string, string>();
-for (const r of rows) { const k = `${r.set ?? 'main'}|${r.model}|${r.mode}`; if (!latest.has(k) || r.runId > latest.get(k)!) latest.set(k, r.runId); }
+for (const r of rows) { const k = `${r.set ?? 'main'}|${r.model}|${r.mode}${r.mode === 'hybrid' ? ` ${r.prompt ?? 'v1'}` : ''}`; if (!latest.has(k) || r.runId > latest.get(k)!) latest.set(k, r.runId); }
 const groups = new Map<string, Row[]>();
 for (const r of rows) {
-  const k = `${r.set ?? 'main'}|${r.model}|${r.mode}`;
+  const k = `${r.set ?? 'main'}|${r.model}|${r.mode}${r.mode === 'hybrid' ? ` ${r.prompt ?? 'v1'}` : ''}`;
   if (latest.get(k) !== r.runId) continue;
   if (!groups.has(k)) groups.set(k, []);
   groups.get(k)!.push(r);
 }
 const pct = (n: number, d: number) => (d ? `${Math.round((100 * n) / d)}%` : '—');
 const q = (xs: number[], p: number) => { const s = [...xs].sort((x, y) => x - y); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : 0; };
-const order = (k: string) => { const [set, model, mode] = k.split('|'); return `${set === 'main' ? 0 : 1}|${['rules', 'hybrid', 'context', 'tools'].indexOf(mode)}|${model}`; };
+const order = (k: string) => { const [set, model, mode] = k.split('|'); return `${set === 'main' ? 0 : 1}|${['rules', 'hybrid v1', 'hybrid v2', 'context', 'tools'].indexOf(mode)}|${model}`; };
 const lines = [...groups.entries()].sort((x, y) => order(x[0]).localeCompare(order(y[0]))).map(([k, v]) => {
   const [set, model, mode] = k.split('|');
   const n = v.length, ms = v.map((x) => x.ms / 1000), req = v.filter((x) => x.grade.requirements !== null && x.grade.requirements !== undefined);
@@ -36,6 +36,7 @@ conclusions: [ML.md](../../ML.md) §3.
 - Modes: **rules** = keywords read the comments, code applies the policy (no model). **hybrid** = the model only reads
   the comments, code applies the policy. **context** = the model applies the whole policy from facts in one prompt.
   **tools** = the model calls tools, then applies the whole policy.
+- **hybrid v1 / v2** are two versions of the comment-reading prompt (v2 adds thresholds and examples after v1's misses on the main set, so the main set is no longer a blind test for v2; the messy set was not used to write v2).
 - Graders: verdict; target rate within $50 (not graded when the answer is skip); grounded = no number in the reasons
   that isn't in the facts; comments read right (rules and hybrid only).
 - Hardware: the Linux server's CPU (Ryzen 7 3700U, 4 cores, no GPU), Ollama, temperature 0, shared with the live
