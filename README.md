@@ -1,6 +1,30 @@
-# Load Radar: start here
+# Load Radar
 
-A plain-language guide to this project: what problem it solves, why it's built this way, what every term means, how it grows to 1000x, and what has been measured so far. The detailed documents are listed at the end.
+**Load Radar watches US truckload boards for a dispatcher and alerts them the moment a load matching one of their saved searches is posted, then helps decide whether to take it.** A dispatcher types a search in plain English ("reefer out of Fresno, nothing under $3"), and the system polls every board on that dispatcher's own logins within each board's limits, recognizes the same load posted many times, matches it against thousands of saved searches, and delivers one alert per real load within seconds. Every part is measured against a written target (SLOs) and an answer key.
+
+It's built as an interview project for [Numeo](https://numeo.ai), which makes AI agents for trucking, with the focus on **backend/infrastructure** (scale, overload, observability) and **AI/ML** (a trained dedup classifier, a search parser, a load-decision agent with evals). Everything runs on one Linux laptop, deploys itself on every push, and can be tried live in a browser.
+
+### What it consists of
+
+| Part | What it does | Where |
+| --- | --- | --- |
+| **Engine** | The hot path: schedules polls per board login (budgets, back-off, one request in flight per login), normalizes each board's format, **dedups** (exact ids, then a trained classifier), **matches** against saved searches with a geohash index, and sends alerts (digests, rate limits, freshest first under load) | [src/](src/) |
+| **Search parser** | Turns a typed search into a structured one: rules first, the **GLiNER2** model only for what rules miss, questions instead of guesses | [src/parse/](src/parse/) |
+| **Dedup classifier** | Logistic regression on 18 pair features, trained on 305K labeled pairs; scored in TypeScript (~130 ns/pair) | [src/dedup/](src/dedup/), [ml/dedup/](ml/dedup/) |
+| **Load-decision agent** | "Should I take it?": a local LLM reads the broker's comments, code applies the dispatch policy (book / negotiate / ask / skip); compared with a full tool-calling agent in evals | [src/agent/](src/agent/), [ml/agent/](ml/agent/) |
+| **Simulated world** | A calibrated generator of loads, brokers, reposts, cross-posts and dispatchers (matched to DAT market data), plus simulated load boards (rate limits, bans) and Telegram, and an **answer key** that scores every alert | [sim/](sim/), [sims/](sims/), [scorer/](scorer/) |
+| **Live mode + UI** | An always-on world (new data every start) with a React/shadcn page: save searches, see alerts, ask the agent, watch the board firehose, push speed and volume | [live/](live/), [ui/](ui/) |
+| **Observability** | OpenTelemetry → Collector → Prometheus (metrics), Tempo (traces), Loki (logs), Langfuse (every model call); Grafana dashboard with SLOs, burn rates and saturation | [ops/](ops/), [OBSERVABILITY.md](OBSERVABILITY.md) |
+| **Deployment** | Docker Compose on one server; a cron pulls from GitHub and redeploys within a minute of a push; SSH tunnel to the Mac | [DEPLOY.md](DEPLOY.md) |
+
+### Measured so far
+
+- **SLOs at 1×** (alerts within 60 s, matching loads alerted, no bans): all met. Up to 2,000 dispatchers on one engine thread; the speed SLO breaks at 5,000 ([SLO.md](SLO.md)).
+- **Dedup classifier**: wrong merges 1,806 → 27 on held-out pairs; end to end, missed alerts 4.73% → 1.80% and duplicates 2.74% → 0% ([ML.md](ML.md)).
+- **Search parser**: 98% of test searches fully right with rules + GLiNER2 ([ml/parser/RESULTS.md](ml/parser/RESULTS.md)).
+- **Load-decision agent**: a small model doing the whole decision is right 29–50% of the time; the same model only reading the comments, with code deciding, is right 94% on messy real-world wording vs 56% for keywords (first results; the full comparison across model sizes is running, [ml/agent/](ml/agent/)).
+
+The rest of this page is a plain-language guide: the problem, why it's built this way, what every term means, how it grows to 1000×. The detailed documents are listed at the end.
 
 ---
 
@@ -36,7 +60,7 @@ The project goes deep on two areas: **backend/infrastructure** (scaling, measure
 - **Search parser: rules + a small model.** Rules handle dispatcher shorthand; a small local model (GLiNER2, or Qwen via Ollama) fills what the rules miss; one normalizer resolves places, regions and typos and asks instead of guessing. Five contenders compared on one eval set: [ml/parser/RESULTS.md](ml/parser/RESULTS.md).
 - **LLM observability:** every model call is an OpenTelemetry GenAI span, routed to self-hosted **Langfuse** (prompt, output, tokens, latency, eval scores), Grafana (Tempo for the trace, Loki for the logs) and Prometheus. See OBSERVABILITY.md §8b.
 
-No frontend: the user-facing side is shown through the simulators, the scorer and the dashboards.
+The user-facing side is the live mode page (searches, alerts, the agent) plus the simulators, the scorer and the dashboards.
 
 ## 3. The solution in one picture
 
