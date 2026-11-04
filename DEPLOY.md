@@ -8,7 +8,7 @@ Mac                                        Server (Docker Compose, ~/load-radar)
               9090,9095,4318,7100,11435} ──────────────►                            prometheus, minio, gliner2, ollama
  code    ──► git push ─► GitHub ─► git pull ► ~/load-radar ─► app (node:26, on demand): engine, simulators, eval
                                                           ├─► gliner2 :7100   (GLiNER2, CPU)
-                                                          ├─► ollama  :11434  (Qwen 2.5 1.5B, CPU)
+                                                          ├─► ollama  :11434  (Qwen 2.5 1.5B / 3B / 7B, CPU: parser eval, load-decision agent)
                                                           └─► otel-collector :4318 ─► tempo (traces) / loki (logs) / langfuse / prometheus
 ```
 

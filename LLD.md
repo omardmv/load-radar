@@ -24,7 +24,7 @@ So the order is:
 | `boards-sim` | replays `out/postings.ndjson` with budgets, 429s, bans, covered loads | — |
 | `telegram-sim` | enforces Telegram rate limits, logs deliveries | — |
 | `scorer` | offline, compares deliveries with the answer key | files |
-| `live` | one always-on process: `sim/world.ts` as a stream, boards-sim and telegram-sim in-process, `engine`, a rolling scorer, and the UI's HTTP + SSE API | nothing outside the container except the browser and the observability collector; saved searches persist in the `live_state` volume |
+| `live` | one always-on process, two threads. **World thread** (`live/world-worker.ts`): `sim/world.ts` as a stream, boards-sim and telegram-sim on 127.0.0.1:7001/7002, the rolling answer key. **Main thread** (`live/server.ts`): `engine`, the UI's HTTP + SSE API, the search parser and the load-decision agent | the threads exchange messages (clock anchor, searches, stats, postings, alerts, load facts); the engine reaches the simulators over HTTP; outside the container: GLiNER2, Ollama, the collector, the browser; saved searches persist in the `live_state` volume |
 
 Infrastructure in `docker compose` (DEPLOY.md): OpenTelemetry Collector, Tempo, Loki, Prometheus, Grafana (observability), GLiNER2 and Ollama (the search parser's models), self-hosted Langfuse, and the `live` service itself. All of it runs continuously on one Linux server; `app` is the only service that runs on demand.
 
@@ -128,11 +128,14 @@ api ─▶ planner ─▶ scheduler ─▶ [poll queue] ─▶ pollers ─▶ [r
 
 - Every arrow is a **bounded** queue (ring buffer) with a length metric and a wait-time metric.
 - **Backpressure** is built in: when a queue is full, the producer `await`s instead of piling up work. The scheduler watches the poll queue and stretches intervals when pollers fall behind (section 6.3). Polling slower is better than queuing stale polls.
+- **Overload rules on the poll path** (`src/engine.ts`): an entry still queued, waiting for its login, or running is never queued again (`polls_coalesced`), so the poll queue can't grow past the number of plan entries; and each login has at most **one request in flight** (`busyLogins`, `waitingForLogin`), so a 429 can pause a login before more requests reach the board.
 - Each stage processes **batches** (whatever is waiting, up to N) per turn of the event loop, so a burst doesn't starve other stages, and `nodejs_eventloop_lag_seconds` stays low.
 
 ## 5. APIs
 
-### 5.1 Public API (inside `engine`)
+### 5.1 Public API (inside `engine`), production design
+
+Not built in this form. What runs today is live mode's API (section 6.10): same ideas, one user, no credentials endpoint.
 
 | Method | Path | Body / response |
 | --- | --- | --- |
@@ -358,7 +361,9 @@ Implementation: two heaps on `postedAt` (min and max) over the same items, or on
 
 ### 6.10 Live mode (`live/`)
 
-Live mode runs the whole pipeline above as one always-on process instead of a one-shot batch job, plus a UI. DESIGN.md §3.0 has the overall diagram; this section is the detail the other components above don't cover.
+Live mode runs the whole pipeline above continuously instead of as a one-shot batch job, plus a UI: one process, two threads. DESIGN.md §3.0 has the overall diagram; this section is the detail the other components above don't cover.
+
+**`live/world-worker.ts`** — the outside world on its own thread: the stream, boards-sim and telegram-sim (HTTP on 127.0.0.1:7001/7002, so the engine talks to them exactly as to real boards) and the answer key, which must see both loads being born and alerts being delivered. Messages in: `clock` (the new anchor after a speed change), `rate`, `burst`, `searches` (your searches changed: rebuild the answer key), `loadFacts` (the agent asks about one load). Messages out: `ready`, `stats` every second (world, boards, score, the thread's event-loop p99), `postings` every 250 ms, `alert` for your deliveries, `loadFacts` replies.
 
 **`live/stream.ts`** — a world that never stops. It wraps `sim/world.ts`'s `createWorld(seed)` in a real-time loop: `tick()` samples a Poisson count of new loads for however much simulated time just passed (rate = `loadsPerDay × HOURLY[centralHour(now)] / HOURLY_SUM`, the same hourly curve the batch generator uses), creates them, and schedules every posting each one will ever get (`world.postingsFor`: first post, refreshes, reposts, cross-board copies, a co-broker) on a min-heap keyed by `posted_at`. Due postings are released into the same `BoardData` shape `boards-sim` serves from, indexed by `geohash(origin, 3)`, so `src/engine.ts` can't tell live mode's boards from the batch simulator's. `prune()` drops postings older than `KEEP_MS` (6 simulated hours) so memory doesn't grow forever. `burst(city, equip, count, windowMs)` adds many loads out of one market inside a short window — the UI's burst button.
 
@@ -376,7 +381,8 @@ Live mode runs the whole pipeline above as one always-on process instead of a on
 | `DELETE` | `/api/searches/:id` | removes the search, persists, and calls `engine.refreshSearches()` |
 | `POST` | `/api/speed` | sets the clock's speed, clamped to 1–120× |
 | `POST` | `/api/rate` | sets `loadsPerDay`, clamped to 1,000–500,000 |
-| `POST` | `/api/burst` | triggers `stream.burst`, clamped to 5,000 loads |
+| `POST` | `/api/burst` | asks the world thread for a burst, clamped to 5,000 loads |
+| `POST` | `/api/agent` | "Should I take it?" for one alerted load: asks the world thread for the load and the lane's market rate, builds your truck from your nearest saved search of that equipment, runs the load-decision agent (`src/agent/`, mode and model from `--agent-mode` / `--agent-model`), and returns its decision next to the written policy's answer, with latency, tokens and the trace id |
 
 Every path except `/api/events` and `/api/state` runs inside one OpenTelemetry trace (`SpanKind.SERVER`); path parameters like `/api/searches/Y12` are normalized to `/api/searches/:id` in the span name so traces group by route, not by every individual search id.
 

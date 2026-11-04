@@ -54,7 +54,7 @@ Reads outnumber new loads about 1000 to 1. **The work is in polling, deduplicati
 flowchart LR
   subgraph CP["Control plane: when a search is created (rare)"]
     U[Dispatcher] -->|"need reefer out of Fresno, 3.40+"| API[Search API]
-    API --> PARSE["Search parser<br/>rules first, LLM if unsure,<br/>validate, confirm with user"]
+    API --> PARSE["Search parser<br/>rules first; GLiNER2 only if equipment<br/>or origin is missing; asks, never guesses"]
     PARSE --> STORE[(Searches)]
     STORE --> PLAN["Plan compiler<br/>poll plan per login<br/>+ matcher index"]
   end
@@ -65,10 +65,10 @@ flowchart LR
   end
 
   subgraph DP["Data plane: every posting (hot path, no LLM)"]
-    SCHED["Scheduler<br/>per-login budget, busy lanes more often,<br/>jitter, backoff, circuit breaker"]
+    SCHED["Scheduler<br/>per-login budget, busy lanes more often,<br/>1 request in flight per login, duplicate polls<br/>coalesced, backoff, circuit breaker"]
     POLL[Poller pool]
     NORM["Normalizer<br/>board format → one Load schema<br/>+ who may see it"]
-    DEDUP["Dedup<br/>1: exact (board id, content hash)<br/>2: same-load classifier"]
+    DEDUP["Dedup<br/>1: exact (board id, content hash)<br/>2: trained classifier (logistic regression)"]
     MATCH["Matcher<br/>index: origin cell × equipment × date<br/>then exact filters + entitlement"]
     Q["Alert queue<br/>oldest first, freshest first when overloaded,<br/>drop stale, one alert per user per load"]
     SEND["Notifier<br/>rate limits per bot and per chat,<br/>digests, several channels"]
@@ -79,43 +79,53 @@ flowchart LR
   SCHED --> POLL --> GATED
   GATED --> NORM
   SHARED --> NORM
-  NORM --> DEDUP --> MATCH --> Q --> SEND --> PHONE[Dispatcher's phone]
+  NORM --> DEDUP --> MATCH --> Q --> SEND --> PHONE[Dispatcher's phone / web]
+  PHONE -->|"Should I take it?"| AGENT["Load-decision agent<br/>local model reads the broker's comments,<br/>code applies the dispatch policy:<br/>book / negotiate / ask / skip"]
 
-  OBS["Observability: traces per posting, metrics, SLO dashboard, LLM call log"]
+  OBS["Observability: OpenTelemetry traces and logs, Prometheus metrics,<br/>SLOs with burn-rate alerts, every model call in Langfuse"]
   DP -.-> OBS
   CP -.-> OBS
+  AGENT -.-> OBS
 ```
 
 ### 3.0 Live mode: the same pipeline, running continuously
 
-The `live` service (`live/server.ts`) wires the whole diagram above into one always-on Node process with a UI, instead of a batch run against a fixed dataset. It's what runs on the server and what a visitor sees at the live UI:
+The `live` service runs the whole diagram above continuously, with a UI, instead of a batch run against a fixed
+dataset. It's one container with **two threads**: the simulated outside world gets its own event loop and core, so the
+engine doesn't share a CPU with the boards it polls.
 
 ```
-sim/world.ts (createWorld(seed)) ──► live/stream.ts (Poisson arrivals, US Central hour-of-day)
-       │ makeLoad / postingsFor: each real load becomes several postings over time
-       ▼
- boards-sim + telegram-sim (in-process, same clock) ◀── src/engine.ts polls, normalizes, dedups, matches, alerts
-       │                                                        │
-       │                                               live/score.ts: rolling answer key, built as each load is born
-       ▼                                                        │
- live/server.ts HTTP + SSE API  ───────────────────────────────►│
-   /api/state /api/events (snapshot + live stream)              │
-   /api/parse /api/searches (search parser, cold path)          │
-   /api/speed /api/rate /api/burst (push the clock and volume)  │
-       │                                                        ▼
-       └────────────────────────────────────────────►  ui/ (React + shadcn/ui, built by Vite, served as static files)
+┌─ live container: one Node process, two threads ───────────────────────────────────────────────────────────┐
+│ WORLD THREAD  live/world-worker.ts  ("the outside world": its own event loop and core)                     │
+│   sim/world.ts ─► live/stream.ts   new loads forever (Poisson, US Central hour of day); every refresh,      │
+│                                    repost, cross-post and co-broker copy scheduled and released on time   │
+│     ├─► boards-sim    :7001  per-login budgets, 429 + Retry-After, bans, loads covered after ~20 min      │
+│     ├─► telegram-sim  :7002  30 msg/s per bot, 1 msg/s per chat                                           │
+│     └─► live/score.ts        answer key built as each load is born; scores every delivery                 │
+│              ▲ HTTP, exactly as to real boards                │ messages: stats, postings, your alerts,   │
+│              │                                                ▼ load facts for the agent                  │
+│ MAIN THREAD  live/server.ts                                                                                │
+│   src/engine.ts  scheduler (√ budgets, 1 request in flight per login, duplicate polls coalesced)          │
+│                  ─► pollers ─► normalize ─► dedup (exact id, then logistic-regression classifier)          │
+│                  ─► matcher (geohash index) ─► alert queue ─► notifier (digests; under backlog freshest    │
+│                     first, stale dropped) ─► telegram-sim                                                  │
+│   HTTP + SSE  /api/state /api/events /api/searches /api/speed /api/rate /api/burst                         │
+│               /api/parse ─► rules; GLiNER2 only if equipment/origin missing ─────────► gliner2 :7100       │
+│               /api/agent ─► model reads broker comments, code applies the policy ────► ollama :11434       │
+│   /metrics (answer-key counters for the SLOs)      :9464 (engine metrics)                                  │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+   ui/ (React + shadcn, static) ◄── browser, through the SSH tunnel on :8080
 
-Every /api/* request except /api/events and /api/state is one OpenTelemetry trace (SpanKind.SERVER), with
-child spans for the search parser's model calls. src/obs/log.ts writes one JSON log line per event, to
-stdout and over OTLP, carrying the active trace_id. Both go to the same collector as the batch engine:
-
- live/server.ts ──traces──► otel-collector :4318 ──┬─► tempo (every trace; Grafana Explore / Traces Drilldown)
-                                                     ├─► loki (logs, linked to tempo by trace_id)     } all in
-                                                     ├─► langfuse-web :3001 (GenAI spans only)         Grafana :3000
-                                                     └─► spanmetrics ──► prometheus :9090 (llm_calls_total, llm_duration_*)
+Telemetry
+  code ── OTLP ─► otel-collector :4318 ─┬─ traces ─────► tempo        every trace (Grafana: timelines)
+                                         ├─ traces/genai ► langfuse     model calls, agent runs, tool calls
+                                         ├─ traces/llm ──► spanmetrics ─► prometheus   llm_calls_total, llm_duration_*
+                                         └─ logs ───────► loki         one JSON line per event, with trace_id
+  prometheus scrapes live:9464 and live:8080/metrics; rules turn them into SLIs, error budgets and burn-rate alerts
+  grafana :3000 reads prometheus, tempo and loki (linked by trace_id); langfuse :3001 has its own UI
 ```
 
-Speed is adjustable while running (`src/shared/clock.ts`, `createAdjustableClock`): the UI's speed slider re-anchors sim time to real time on every change instead of restarting the process. Saving or removing a search calls `engine.refreshSearches()`, which rebuilds the matcher index and polling plans and cancels any alert still queued or held for a search that's gone (LLD §6.10).
+Speed is adjustable while running (`src/shared/clock.ts`, `createAdjustableClock`): the UI's speed slider re-anchors sim time to real time on every change instead of restarting the process, and the new anchor is copied to the world thread so both threads keep one simulated time. Saving or removing a search calls `engine.refreshSearches()`, which rebuilds the matcher index and polling plans and cancels any alert still queued or held for a search that's gone (LLD §6.10).
 
 `live/server.ts` also serves its own `/metrics` (separate from the engine's own `:9464`), exporting the live answer key as `answer_key_settled_total` / `answer_key_other_total`: that's what the SLOs in [SLO.md](SLO.md) and the dashboard's SLO row are built on.
 
@@ -205,10 +215,20 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 | 14 | **Synthetic data calibrated to real numbers**, with an answer key | Boards forbid scraping; the answer key makes misses and latency measurable exactly | Scraped samples | Results depend on simulator assumptions (`sim/ASSUMPTIONS.md`, `sim/validate.ts`) |
 | 15 | **Benchmarks on a pinned Linux core**, noise floor reported | Laptop noise (±10%) hides 5% effects; pinned: ±1.4% | Laptop runs | Needs a Linux machine (the `dev` server) |
 | 16 | **TypeScript on Node** | One language for engine, simulators and UI; measured fast enough per posting | Go or Rust | One JS thread per process: worker threads and more processes needed sooner |
-| 17 | **Live mode as one process** (`live/server.ts`): world, board/Telegram simulators, engine and UI together, on one adjustable clock | Simplest thing that gives a visitor a running demo; the live scorer needs the same clock as everything it's scoring | Separate processes per simulator, like batch mode | One process to restart; the same single-core ceiling as the engine itself (found at 120×/100K loads/day, README "Known issues") |
+| 17 | **Live mode as one container, two threads**: the simulated world (stream, boards, Telegram, answer key) on a worker thread, the engine and API on the main thread | The engine must not share a core with the boards it polls; the answer key must see both sides (loads born, alerts delivered) on one clock | One thread (first version: the boards stole the engine's CPU); separate processes per simulator, like batch mode | Message passing between threads, and the clock anchor copied on every speed change; still one process to restart |
 | 18 | **Tempo + Loki, not Jaeger**, for traces and logs | Both are Grafana's own backends: one UI for metrics, traces and logs, linked (log → trace by `trace_id`, trace → logs, latency exemplars → trace). Tempo's `local-blocks` processor gives TraceQL rate/error/duration metrics with no separate query engine | Jaeger (own UI, no built-in log link); a hosted trace backend | One more self-hosted service (Loki) to run and keep healthy |
 | 19 | **Pull-based continuous deploy** (cron runs `ops/server/deploy.sh` every minute: fetch, fast-forward, rebuild) over a self-hosted CI runner on this public repo | A self-hosted GitHub Actions runner on a public repo executes any PR's code; cron only ever reads `main` from GitHub, and the server accepts no inbound connections at all | Self-hosted Actions runner; a webhook-triggered deploy (needs an open port) | Up to a minute of deploy lag; no rollback button, just `git revert` and push |
 | 20 | **Adjustable sim clock** (`createAdjustableClock`): speed can change mid-run, re-anchoring sim time to real time | The live UI's speed slider must not make `now()` jump when the user drags it | A fixed-speed clock, restarted to change speed (what batch mode uses) | A little extra bookkeeping (re-anchor on every speed change) instead of a single multiply |
+| 21 | **SLOs first** (alerts within 60 s, matching loads alerted, no bans), with 1-hour error budgets and multi-window burn-rate alerts (SLO.md) | Every later change is judged by a number the dispatcher would care about; burn rates page on real trouble, not on one slow minute | Alert on raw thresholds (p95 > X); no targets | Targets are our guess at what dispatchers need; a 1-hour window because the live world restarts on every deploy (production would use 28–30 days) |
+| 22 | **Overload rules for polling:** a poll still queued or running is never queued again (coalesced); at most one request in flight per login | A poll asks "new since my cursor", so a copy fetches nothing; pausing a login after a 429 only works if nothing else is on the wire for it (the 120× ban storm: 541/548 logins) | Queue every poll (first version); only a global concurrency cap | A login's throughput is capped at 1 ÷ request latency; at 30× speed, completeness fell (92.3% → 87.9%) while speed rose (48.8% → 83.7% within 60 s) |
+| 23 | **Alert backlog rules:** freshest first, alerts older than 10 min dropped, digests of 20 instead of 5, a cap per chat | Under backlog, an old load is probably taken; on time or not at all | FIFO until the backlog clears | Some alerts are dropped on purpose (counted as `notifier_dropped_stale`) |
+| 24 | **Dedup model: logistic regression**, scored in TypeScript, parity with Python checked at startup | 18 multiply-adds (~130 ns/pair), readable weights, no Python or native library in the engine; recall 99.4% vs LightGBM's 99.9% (ML.md) | LightGBM (needs a tree runtime or ONNX); the hand-written rule (1,806 wrong merges vs 27) | Slightly more duplicates than LightGBM; features must stay identical in training and serving (one `pairFeatures()` for both) |
+| 25 | **Dedup threshold at precision ≥ 0.995**, chosen on a time-split validation set | A wrong merge hides a real load from every dispatcher; a missed merge is one duplicate alert | Threshold 0.5; best F1 | More duplicates than a recall-maximizing threshold |
+| 26 | **Load decision: the model reads language, code applies the policy** ("split" design) | Measured: a small model doing the whole decision was right 29–50% of the time; the same model only reading the broker's comments, 94% on messy wording (vs 56% for keywords), 1 short call | A full tool-calling agent (more autonomous, slower, invents numbers); keywords only | Needs the policy written down; the model's job is narrow, by design |
+| 27 | **Local models only** (Ollama, Qwen 2.5, on CPU) | Free, private, no API keys; the evals show what each size can and can't do | A hosted LLM API (faster, stronger) | Slow on this CPU (seconds to minutes per call), weaker models; the design keeps model calls off the hot path |
+| 28 | **SSE to the browser**, POST for commands | Data flows server → page; SSE is plain HTTP and reconnects by itself | WebSockets (two-way, not needed); polling from the page | No resume after reconnect yet (`Last-Event-ID`); one connection per tab |
+| 29 | **Bounded in-memory queues between stages now, a stream (Kafka/Redpanda) later** | One machine, the bottleneck is CPU and login budgets, not moving data; a stream adds a hop, disk and a service to run | A stream from day one | A restart loses what's in the queues; the switch is planned for when stages span machines (LLD §12) |
+| 30 | **Dashboards, alert rules and data sources as code** (`ops/grafana/`, `ops/prometheus-rules.yml`) | Reviewed in git, deployed with everything else, rebuilt identically on a new server | Clicking them together in the Grafana UI | Edits made in the UI are overwritten on restart |
 
 ## 5. What breaks first at 1000x (hypotheses the load test will confirm or correct)
 
@@ -226,7 +246,7 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 
 | Stage | Example size | Runs as | Next limit | Response |
 | --- | --- | --- | --- | --- |
-| Today | ~5,000 customers, ~5,300 board checks/s | One engine process, in-memory state | Login budgets | Query merging, √-rule budget allocation |
+| Today (measured, SLO.md) | 2,000 dispatchers (3,600 logins) within all SLOs on one engine thread; the speed SLO breaks at 5,000 | One engine thread, in-memory state; the simulated world on its own thread | The engine thread's CPU (event loop 0.4–0.5 s late from 1,000 dispatchers) | Engine workers, each owning a share of the logins |
 | 10x | ~50,000 customers | + worker threads partitioned by login | One CPU core (JSON parsing of responses) | Threads, then processes |
 | 100x | ~500,000 customers | Several machines, each owning partitions (login / cell / user) | Telegram delivery; memory per machine | Push as main channel, more bots; compact state |
 | 1000x | ~5M customers | Many machines, partitions connected by Kafka; snapshots + log replay | Login budgets as a business limit | Shared and partner feeds wherever possible |
