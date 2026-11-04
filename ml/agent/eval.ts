@@ -5,8 +5,10 @@
 //   target     |target_rate - expected| <= $50 (not graded when the right answer is "skip")
 //   grounded   every number in the reasons comes from a tool result or a value the policy derives from them
 //   valid      the model produced a decision in the required shape
-// Writes ml/agent/RESULTS.md (appends one table row per model x mode as it finishes) and ml/agent/runs.jsonl.
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+//   requirements  (rules/hybrid modes) the comments were read right: needs tarps / needs frozen
+// Appends one line per case to ml/agent/runs.jsonl; node ml/agent/report.ts turns all runs into ml/agent/RESULTS.md.
+// Modes: tools, context, hybrid, rules (src/agent/agent.ts). Add --cases ml/agent/cases_messy.jsonl for the messy set.
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -19,7 +21,8 @@ const { values: a } = parseArgs({ options: {
   ollama: { type: 'string', default: 'http://127.0.0.1:11434' }, models: { type: 'string', default: 'qwen2.5:1.5b-instruct-q8_0' },
   modes: { type: 'string', default: 'context,tools' }, cases: { type: 'string', default: join(here, 'cases.jsonl') }, limit: { type: 'string', default: '0' },
   otlp: { type: 'string', default: 'off' }, langfuse: { type: 'string', default: '' } } });
-type Case = { id: string; facts: Facts; expected: Decision; traps: string[] };
+type Case = { id: string; facts: Facts; expected: Decision; traps: string[]; requirements?: { needs_tarps: boolean; needs_frozen: boolean } };
+const set = a.cases!.includes('messy') ? 'messy' : 'main';
 let cases: Case[] = readFileSync(a.cases!, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 if (Number(a.limit)) cases = cases.slice(0, Number(a.limit));
 const tracing = setupLlmTracing({ endpoint: a.otlp === 'off' ? null : a.otlp!, serviceName: 'load-radar-agent-eval' });
@@ -49,7 +52,8 @@ function grade(c: Case, r: AgentRun) {
   const verdict = !!d && d.verdict === e.verdict;
   const target = !!d && (e.verdict === 'skip' || (d.target_rate !== null && e.target_rate !== null && Math.abs(d.target_rate - e.target_rate) <= 50));
   const g = d ? grounded(d.reasons, allowedNumbers(c.facts, e)) : { ok: false, invented: [] };
-  return { verdict, target, grounded: g.ok, invented: g.invented, valid: !!d };
+  const req = c.requirements && r.requirements ? r.requirements.needs_tarps === c.requirements.needs_tarps && r.requirements.needs_frozen === c.requirements.needs_frozen : null;
+  return { verdict, target, grounded: g.ok, invented: g.invented, valid: !!d, requirements: req };
 }
 async function score(traceId: string | null, name: string, value: number) {
   const pk = env('LANGFUSE_PUBLIC_KEY'), sk = env('LANGFUSE_SECRET_KEY');
@@ -58,18 +62,6 @@ async function score(traceId: string | null, name: string, value: number) {
     body: JSON.stringify({ traceId, name, value, dataType: 'NUMERIC' }) }).catch(() => {});
 }
 
-const results = join(here, 'RESULTS.md');
-if (!existsSync(results) || !readFileSync(results, 'utf8').includes('| Model | Mode |')) {
-  writeFileSync(results, `# Load-decision agent: eval results
-
-Cases: \`ml/agent/cases.jsonl\` (${cases.length} loads from the world model, seed 21; 6 per verdict; ${cases.filter((c) => c.traps.length).length} with comment traps).
-Answer key: \`src/agent/policy.ts\`. Graders: verdict, target rate within $50, grounded (no invented numbers), valid JSON.
-Hardware: the Linux server's CPU (Ryzen 7 3700U, no GPU), Ollama, temperature 0. Background in [ML.md](../../ML.md).
-
-| Model | Mode | Verdict | Target rate | Grounded | Valid | Comment traps | Model calls / case | Latency p50 / p95 | Tokens in / out per case |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-`);
-}
 const pct = (n: number, d: number) => `${Math.round((100 * n) / Math.max(1, d))}%`;
 const q = (xs: number[], p: number) => { const s = [...xs].sort((x, y) => x - y); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : 0; };
 
@@ -79,15 +71,14 @@ for (const model of a.models!.split(',')) for (const mode of a.modes!.split(',')
     const r = await runAgent({ url: a.ollama!, model, mode, facts: c.facts, tracer: tracing.tracer, sessionId: `agent-eval-${runId}-${model}-${mode}`, metadata: { case: c.id } });
     const g = grade(c, r);
     rows.push({ c, r, g });
-    appendFileSync(join(here, 'runs.jsonl'), JSON.stringify({ runId, model, mode, case: c.id, expected: c.expected, decision: r.decision, error: r.error, grade: g, modelCalls: r.modelCalls, tools: r.toolCalls, ms: Math.round(r.latencyMs), tokens: [r.inputTokens, r.outputTokens], traceId: r.traceId }) + '\n');
+    appendFileSync(join(here, 'runs.jsonl'), JSON.stringify({ runId, set, model, mode, case: c.id, requirements: r.requirements, expected: c.expected, decision: r.decision, error: r.error, grade: g, modelCalls: r.modelCalls, tools: r.toolCalls, ms: Math.round(r.latencyMs), tokens: [r.inputTokens, r.outputTokens], traceId: r.traceId }) + '\n');
     await score(r.traceId, 'agent_verdict_correct', g.verdict ? 1 : 0);
     await score(r.traceId, 'agent_grounded', g.grounded ? 1 : 0);
-    console.error(`${model} ${mode} ${c.id}: ${r.decision?.verdict ?? r.error} (want ${c.expected.verdict}) ${g.verdict ? 'ok' : 'WRONG'}${g.invented.length ? ` invented ${g.invented}` : ''} ${(r.latencyMs / 1000).toFixed(1)}s`);
+    console.error(`${set} ${model} ${mode} ${c.id}: ${r.decision?.verdict ?? r.error} (want ${c.expected.verdict}) ${g.verdict ? 'ok' : 'WRONG'}${g.invented.length ? ` invented ${g.invented}` : ''} ${(r.latencyMs / 1000).toFixed(1)}s`);
   }
   const n = rows.length, traps = rows.filter((x) => x.c.traps.length);
   const ms = rows.map((x) => x.r.latencyMs / 1000);
-  const line = `| ${model} | ${mode} | **${pct(rows.filter((x) => x.g.verdict).length, n)}** | ${pct(rows.filter((x) => x.g.target).length, n)} | ${pct(rows.filter((x) => x.g.grounded).length, n)} | ${pct(rows.filter((x) => x.g.valid).length, n)} | ${pct(traps.filter((x) => x.g.verdict).length, traps.length)} | ${(rows.reduce((s, x) => s + x.r.modelCalls, 0) / n).toFixed(1)} | ${q(ms, 0.5).toFixed(1)} / ${q(ms, 0.95).toFixed(1)} s | ${Math.round(rows.reduce((s, x) => s + x.r.inputTokens, 0) / n)} / ${Math.round(rows.reduce((s, x) => s + x.r.outputTokens, 0) / n)} |\n`;
-  appendFileSync(results, line);
+  const line = `| ${set} | ${model} | ${mode} | **${pct(rows.filter((x) => x.g.verdict).length, n)}** | ${pct(rows.filter((x) => x.g.target).length, n)} | ${pct(rows.filter((x) => x.g.grounded).length, n)} | ${pct(rows.filter((x) => x.g.valid).length, n)} | ${pct(traps.filter((x) => x.g.verdict).length, traps.length)} | ${(rows.reduce((s, x) => s + x.r.modelCalls, 0) / n).toFixed(1)} | ${q(ms, 0.5).toFixed(1)} / ${q(ms, 0.95).toFixed(1)} s | ${Math.round(rows.reduce((s, x) => s + x.r.inputTokens, 0) / n)} / ${Math.round(rows.reduce((s, x) => s + x.r.outputTokens, 0) / n)} |\n`;
   console.log(line.trim());
 }
 await tracing.shutdown();

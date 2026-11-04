@@ -25,7 +25,7 @@ export type Truth = {
   origin: { city: string; state: string; lat: number; lon: number; market: string };
   dest: { city: string; state: string; lat: number; lon: number; market: string };
   equipment: Equip; equipment_detail: string; miles: number; rate: number | null; weight_lbs: number; pickup_date: string;
-  first_posted_at: string; postings: TruthPosting[];
+  first_posted_at: string; postings: TruthPosting[]; comments: string; broker: string;
 };
 
 // ---------- calibration targets (sources in ASSUMPTIONS.md) ----------
@@ -242,7 +242,7 @@ export function createWorld(seed: number) {
       origin: { city: l.o.name, state: l.o.state, lat: l.o.lat, lon: l.o.lon, market: l.om.city },
       dest: { city: l.d.name, state: l.d.state, lat: l.d.lat, lon: l.d.lon, market: l.dm.city },
       equipment: l.equip, equipment_detail: l.detail, miles: l.miles, rate: l.rate, weight_lbs: l.weight, pickup_date: l.pickup,
-      first_posted_at: new Date(l.posted_at).toISOString(), postings: carried,
+      first_posted_at: new Date(l.posted_at).toISOString(), postings: carried, comments: l.comment, broker: l.broker.name,
     };
     return { postings, truth };
   }

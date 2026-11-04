@@ -24,12 +24,16 @@ import type { ModelCall } from '../src/parse/types.ts';
 import { setupLlmTracing } from '../src/obs/llm.ts';
 import { setupLogs } from '../src/obs/log.ts';
 import type { ToWorld, WorldInit } from './world-worker.ts';
+import { runAgent, type AgentMode } from '../src/agent/agent.ts';
+import { decide, type AgentLoad, type Facts, type Truck } from '../src/agent/policy.ts';
+import { milesBetween } from '../src/shared/geo.ts';
 
 const { values: a } = parseArgs({ options: {
   port: { type: 'string', default: '8080' }, speed: { type: 'string', default: '1' }, 'loads-per-day': { type: 'string', default: '20000' },
   users: { type: 'string', default: '300' }, seed: { type: 'string', default: '' }, budget: { type: 'string', default: '60' },
   gliner: { type: 'string', default: 'http://127.0.0.1:7100' }, otlp: { type: 'string', default: 'off' }, 'metrics-port': { type: 'string', default: '9464' },
-  state: { type: 'string', default: 'data/live' }, 'dedup-model': { type: 'string', default: '' } } });
+  state: { type: 'string', default: 'data/live' }, 'dedup-model': { type: 'string', default: '' },
+  ollama: { type: 'string', default: 'http://127.0.0.1:11434' }, 'agent-model': { type: 'string', default: 'qwen2.5:3b-instruct' }, 'agent-mode': { type: 'string', default: 'hybrid' } } });
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Traces: one per API request (every step, the model's input and output) -> collector -> Tempo; model spans also -> Langfuse.
@@ -76,8 +80,15 @@ const init: WorldInit = { seed, anchor: clock.anchor(), loadsPerDay: Number(a['l
 const worldThread = new Worker(new URL('./world-worker.ts', import.meta.url), { workerData: init });
 const toWorld = (m: ToWorld) => worldThread.postMessage(m);
 worldThread.on('error', (e) => { log('error', 'world.crashed', { error: String(e) }); process.exit(1); });   // container restarts
+const factsWaiting = new Map<number, (x: { load: (AgentLoad & { origin_lat: number; origin_lon: number }) | null; market: number | null }) => void>();
+let factsReq = 0;
+const loadFacts = (loadId: string) => new Promise<{ load: (AgentLoad & { origin_lat: number; origin_lon: number }) | null; market: number | null }>((resolve) => {
+  const reqId = ++factsReq; factsWaiting.set(reqId, resolve); toWorld({ type: 'loadFacts', reqId, loadId });
+  setTimeout(() => { if (factsWaiting.delete(reqId)) resolve({ load: null, market: null }); }, 5_000);
+});
 await new Promise<void>((resolve) => worldThread.on('message', (m) => {
   if (m.type === 'ready') resolve();
+  else if (m.type === 'loadFacts') { factsWaiting.get(m.reqId)?.(m); factsWaiting.delete(m.reqId); }
   else if (m.type === 'stats') ws = m;
   else if (m.type === 'postings') { for (const x of m.postings) ring(recentPostings, x, 60); send('postings', m.postings); }
   else if (m.type === 'alert') {
@@ -206,6 +217,28 @@ async function handle(req: IncomingMessage, res: ServerResponse, url: URL, reqSp
       await span('world.burst', { city, equipment, count }, () => toWorld({ type: 'burst', city, equipment, count }));
       log('info', 'control.burst', { city, equipment, count });
       return json(res, 200, { ok: true });
+    }
+    // "Should I take it?": the load-decision agent on one alerted load, for your truck (ML.md, ml/agent).
+    if (url.pathname === '/api/agent' && req.method === 'POST') {
+      const loadId = String((await body(req)).loadId ?? '');
+      const f = await loadFacts(loadId);
+      if (!f.load || f.market === null) return json(res, 404, { error: 'That load is no longer on the boards.' });
+      // Your truck: where your best-matching saved search says it is, its deadhead and minimum rate; no tarps,
+      // not frozen-capable, 45,000 lbs max (a dry-van or flatbed default; editable later).
+      const s = you.searches.filter((x) => x.equipment === f.load!.equipment)
+        .sort((p1, p2) => milesBetween(p1.lat, p1.lon, f.load!.origin_lat, f.load!.origin_lon) - milesBetween(p2.lat, p2.lon, f.load!.origin_lat, f.load!.origin_lon))[0];
+      if (!s) return json(res, 400, { error: `None of your searches is for ${f.load.equipment}.` });
+      const sv = saved.find((x) => x.spec.searchId === s.searchId);
+      const truck: Truck = { location: sv ? sv.summary.split('·')[1]?.trim().replace(/^within \d+ mi of /, '').split(' →')[0] ?? 'your truck' : 'your truck', lat: s.lat, lon: s.lon,
+        equipment: s.equipment, has_tarps: false, frozen_capable: false, max_weight_lbs: 45_000, max_deadhead_mi: s.deadheadMi, min_rate_per_mile: s.minRpm };
+      const { origin_lat, origin_lon, ...load } = f.load;
+      const facts: Facts = { load, truck, market_rate_per_mile: f.market, deadhead_miles: Math.round(milesBetween(s.lat, s.lon, origin_lat, origin_lon) * 1.17) };
+      const run = await runAgent({ url: a.ollama!, model: a['agent-model']!, mode: a['agent-mode'] as AgentMode, facts, tracer: tracing.tracer, sessionId: 'live-agent', metadata: { load_id: loadId } });
+      const policy = decide(facts);
+      log('info', 'agent.decided', { load_id: loadId, model: a['agent-model'], mode: a['agent-mode'], verdict: run.decision?.verdict, policy: policy.verdict,
+        agrees: run.decision?.verdict === policy.verdict, latency_ms: Math.round(run.latencyMs), model_calls: run.modelCalls, error: run.error ?? undefined });
+      return json(res, 200, { decision: run.decision, error: run.error, policy, facts, model: a['agent-model'], mode: a['agent-mode'],
+        latencyMs: Math.round(run.latencyMs), modelCalls: run.modelCalls, tokens: { in: run.inputTokens, out: run.outputTokens }, requestTraceId: reqSpan?.spanContext().traceId ?? null });
     }
     if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'not_found' });
     // static UI (single page app)

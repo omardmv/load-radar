@@ -15,10 +15,14 @@ export type Truck = {
 export type Facts = { load: AgentLoad; truck: Truck; market_rate_per_mile: number; deadhead_miles: number };
 export type Verdict = 'book' | 'negotiate' | 'ask' | 'skip';
 export type Decision = { verdict: Verdict; target_rate: number | null; reasons: string[] };
+// What the broker's free-text comments require. The only part of the decision that needs reading language.
+export type Requirements = { needs_tarps: boolean; needs_frozen: boolean };
 
 export const needsTarps = (comments: string) => /\b(TARPS REQUIRED|\d+\s*FT TARPS|TARPED|W\/TARPS)\b/i.test(comments) && !/\bNO TARPS?\b/i.test(comments);
 export const needsFrozen = (comments: string) => /-\d+\s*F\b|\bFROZEN\b/i.test(comments);
 const round25 = (x: number) => Math.round(x / 25) * 25;
+// Keyword reading of the comments: exact on the simulator's fixed phrases, brittle on real-world wording.
+export const keywordRequirements = (comments: string): Requirements => ({ needs_tarps: needsTarps(comments), needs_frozen: needsFrozen(comments) });
 
 export const POLICY_TEXT = `Dispatch policy, apply in order:
 1. Skip if the truck can't do it: deadhead (truck to pickup) above the truck's max deadhead; load weight above the truck's max weight; the comments require tarps (e.g. "TARPS REQUIRED", "8FT TARPS"; "NO TARP" means none needed) and the truck has none; the comments say frozen (e.g. "-10F FROZEN") and the truck isn't frozen-capable.
@@ -30,12 +34,12 @@ export const POLICY_TEXT = `Dispatch policy, apply in order:
 Round every target_rate to the nearest $25.`;
 
 // The reference answer: what a careful dispatcher following the policy decides.
-export function decide(f: Facts): Decision {
+export function decide(f: Facts, req: Requirements = keywordRequirements(f.load.comments)): Decision {
   const { load: l, truck: t } = f;
   if (f.deadhead_miles > t.max_deadhead_mi) return { verdict: 'skip', target_rate: null, reasons: [`deadhead ${f.deadhead_miles} mi is above the truck's max ${t.max_deadhead_mi} mi`] };
   if (l.weight_lbs > t.max_weight_lbs) return { verdict: 'skip', target_rate: null, reasons: [`weight ${l.weight_lbs} lbs is above the truck's max ${t.max_weight_lbs} lbs`] };
-  if (needsTarps(l.comments) && !t.has_tarps) return { verdict: 'skip', target_rate: null, reasons: ['load needs tarps; truck has none'] };
-  if (needsFrozen(l.comments) && !t.frozen_capable) return { verdict: 'skip', target_rate: null, reasons: ['frozen load; truck is not frozen-capable'] };
+  if (req.needs_tarps && !t.has_tarps) return { verdict: 'skip', target_rate: null, reasons: ['load needs tarps; truck has none'] };
+  if (req.needs_frozen && !t.frozen_capable) return { verdict: 'skip', target_rate: null, reasons: ['frozen load; truck is not frozen-capable'] };
   const target = Math.max(f.market_rate_per_mile, t.min_rate_per_mile ?? 0);
   if (l.rate === null) return { verdict: 'ask', target_rate: round25(target * l.miles), reasons: ['no rate posted'] };
   const rpm = l.rate / l.miles;

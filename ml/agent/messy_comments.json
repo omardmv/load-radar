@@ -1,0 +1,18 @@
+[
+  { "equipment": "flatbed", "comments": "Must have 8' tarps", "needs_tarps": true, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "load must be tarped at shipper", "needs_tarps": true, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "TARPING REQ'D - LUMBER", "needs_tarps": true, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "tarps + chains needed, 4ft drop", "needs_tarps": true, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "driver to tarp, quick pay avail", "needs_tarps": true, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "tarps NOT needed", "needs_tarps": false, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "no tarping required - steel pipe", "needs_tarps": false, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "doesn't need tarps, straps only", "needs_tarps": false, "needs_frozen": false },
+  { "equipment": "flatbed", "comments": "Tarps optional, shipper has covered dock", "needs_tarps": false, "needs_frozen": false },
+  { "equipment": "reefer", "comments": "deep frozen -10, pulp temps", "needs_tarps": false, "needs_frozen": true },
+  { "equipment": "reefer", "comments": "keep at -20F continuous", "needs_tarps": false, "needs_frozen": true },
+  { "equipment": "reefer", "comments": "FRZN ice cream, 0 degrees", "needs_tarps": false, "needs_frozen": true },
+  { "equipment": "reefer", "comments": "frozen chicken, set unit to -5", "needs_tarps": false, "needs_frozen": true },
+  { "equipment": "reefer", "comments": "keep at 34 continuous, not frozen", "needs_tarps": false, "needs_frozen": false },
+  { "equipment": "reefer", "comments": "fresh produce 36-38F, pulp required", "needs_tarps": false, "needs_frozen": false },
+  { "equipment": "reefer", "comments": "chilled dairy 35F - do NOT freeze", "needs_tarps": false, "needs_frozen": false }
+]

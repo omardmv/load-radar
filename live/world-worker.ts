@@ -18,7 +18,8 @@ export type ToWorld =
   | { type: 'clock'; anchor: ClockAnchor }
   | { type: 'rate'; loadsPerDay: number }
   | { type: 'burst'; city: string; equipment: Equip; count: number }
-  | { type: 'searches'; userId: string; searches: SearchSpec[]; createdAt: [string, number][] };
+  | { type: 'searches'; userId: string; searches: SearchSpec[]; createdAt: [string, number][] }
+  | { type: 'loadFacts'; reqId: number; loadId: string };
 
 const init = workerData as WorldInit;
 const port = parentPort!;
@@ -49,6 +50,13 @@ port.on('message', (m: ToWorld) => {
     if (u) u.searches = m.searches;
     for (const [id, t] of m.createdAt) createdAt.set(id, t);
     score.rebuild();
+  } else if (m.type === 'loadFacts') {
+    const t = stream.loadById(m.loadId);
+    port.postMessage({ type: 'loadFacts', reqId: m.reqId, load: t ? {
+      load_id: t.load_id, origin: `${t.origin.city}, ${t.origin.state}`, origin_market: t.origin.market, dest: `${t.dest.city}, ${t.dest.state}`,
+      origin_lat: t.origin.lat, origin_lon: t.origin.lon, equipment: t.equipment, equipment_detail: t.equipment_detail, rate: t.rate, miles: t.miles,
+      weight_lbs: t.weight_lbs, pickup_date: t.pickup_date, comments: t.comments, broker: t.broker, board: t.postings[0]?.board ?? 'dat',
+    } : null, market: t ? stream.marketRpm(t) : null });
   }
 });
 

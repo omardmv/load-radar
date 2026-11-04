@@ -1,14 +1,16 @@
 // Load-decision agent: a local model (Ollama) decides book / negotiate / ask / skip for one load and one truck.
-// Two modes, compared in the evals (ml/agent):
+// Modes, compared in the evals (ml/agent):
 //   tools    a real agent loop: the model calls get_load / get_truck / get_market_rate / get_deadhead, then answers
 //   context  no tools: code fetches every fact first and pastes it into one prompt (one model call)
+//   hybrid   the model only reads the broker's comments (needs tarps? frozen?); code applies the policy and does the math
+//   rules    no model: keywords read the comments; code applies the policy (the baseline)
 // Every run is one trace: agent span -> each model call (GenAI span: messages, output, tokens) -> each tool call.
 import { SpanStatusCode, type Tracer } from '@opentelemetry/api';
 import { traceLlmCall } from '../obs/llm.ts';
-import { POLICY_TEXT, type Decision, type Facts } from './policy.ts';
+import { POLICY_TEXT, decide, keywordRequirements, type Decision, type Facts, type Requirements } from './policy.ts';
 
-export type AgentMode = 'tools' | 'context';
-export type AgentRun = { decision: Decision | null; error: string | null; modelCalls: number; toolCalls: string[]; inputTokens: number; outputTokens: number; latencyMs: number; traceId: string | null; steps: unknown[] };
+export type AgentMode = 'tools' | 'context' | 'hybrid' | 'rules';
+export type AgentRun = { decision: Decision | null; requirements: Requirements | null; error: string | null; modelCalls: number; toolCalls: string[]; inputTokens: number; outputTokens: number; latencyMs: number; traceId: string | null; steps: unknown[] };
 
 const DECISION_SCHEMA = {
   type: 'object',
@@ -25,6 +27,16 @@ const TOOLS = [
   { type: 'function', function: { name: 'get_market_rate', description: "Typical market rate per mile for this load's lane and equipment.", parameters: { type: 'object', properties: {}, required: [] } } },
   { type: 'function', function: { name: 'get_deadhead', description: 'Empty miles from the truck to the pickup.', parameters: { type: 'object', properties: {}, required: [] } } },
 ];
+const REQ_SCHEMA = {
+  type: 'object',
+  properties: { needs_tarps: { type: 'boolean' }, needs_frozen: { type: 'boolean' }, other_requirements: { type: 'array', items: { type: 'string' }, maxItems: 3 } },
+  required: ['needs_tarps', 'needs_frozen', 'other_requirements'],
+};
+const REQ_SYSTEM = `You read a freight broker's comments on a truckload and say what the truck must have.
+needs_tarps: true only if the load must be covered with tarps (e.g. "TARPS REQUIRED", "8FT TARPS", "must be tarped"). False if tarps are not needed ("NO TARP", "tarps not required") or not mentioned.
+needs_frozen: true only if the load must be kept frozen, at or below about 0 F (e.g. "-10F FROZEN", "deep frozen", "keep at -20"). Chilled loads (e.g. "34F", "36F produce") are NOT frozen.
+other_requirements: up to 3 other things the driver must have or do (e.g. "chains", "load bars", "lumper at delivery"), short.
+Answer JSON only.`;
 const SYSTEM = `You help a truck dispatcher decide about one load for one truck. Use only facts from your tools; never invent numbers.
 ${POLICY_TEXT}
 Answer with JSON: {"verdict": "book"|"negotiate"|"ask"|"skip", "target_rate": number or null (dollars for the whole load), "reasons": up to 3 short reasons that quote the numbers you used}.`;
@@ -34,7 +46,7 @@ type OllamaReply = { model: string; message: Msg; prompt_eval_count?: number; ev
 
 export async function runAgent(opts: { url: string; model: string; mode: AgentMode; facts: Facts; tracer: Tracer | null; sessionId?: string; metadata?: Record<string, string>; maxSteps?: number }): Promise<AgentRun> {
   const t0 = performance.now();
-  const run: AgentRun = { decision: null, error: null, modelCalls: 0, toolCalls: [], inputTokens: 0, outputTokens: 0, latencyMs: 0, traceId: null, steps: [] };
+  const run: AgentRun = { decision: null, requirements: null, error: null, modelCalls: 0, toolCalls: [], inputTokens: 0, outputTokens: 0, latencyMs: 0, traceId: null, steps: [] };
   const toolResult = (name: string): unknown => {
     const f = opts.facts;
     if (name === 'get_load') return f.load;
@@ -77,6 +89,20 @@ export async function runAgent(opts: { url: string; model: string; mode: AgentMo
   };
 
   const body = async () => {
+    // Language for the model, logic for code: the only model job is reading the comments.
+    if (opts.mode === 'rules' || opts.mode === 'hybrid') {
+      tool('get_load');
+      let req: Requirements;
+      if (opts.mode === 'rules') req = keywordRequirements(opts.facts.load.comments);
+      else {
+        const m = await chat([{ role: 'system', content: REQ_SYSTEM }, { role: 'user', content: `Equipment: ${opts.facts.load.equipment_detail}\nComments: ${opts.facts.load.comments || '(none)'}` }], { format: REQ_SCHEMA });
+        try { const j = JSON.parse(m.content); req = { needs_tarps: j.needs_tarps === true, needs_frozen: j.needs_frozen === true }; }
+        catch { throw new Error(`requirements not valid JSON: ${m.content.slice(0, 100)}`); }
+      }
+      run.requirements = req;
+      run.decision = decide(opts.facts, req);
+      return;
+    }
     if (opts.mode === 'context') {
       const facts = Object.fromEntries(['get_load', 'get_truck', 'get_market_rate', 'get_deadhead'].map((n) => [n.replace('get_', ''), tool(n)]));
       const m = await chat([{ role: 'system', content: SYSTEM }, { role: 'user', content: `Facts:\n${JSON.stringify(facts, null, 1)}\nDecide.` }], { format: DECISION_SCHEMA });

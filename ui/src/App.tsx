@@ -172,6 +172,40 @@ function Searches({ saved, setSaved, you }: { saved: Saved[]; setSaved: (f: (s: 
   )
 }
 
+type AgentAnswer = { decision: { verdict: string; target_rate: number | null; reasons: string[] } | null; error: string | null; policy: { verdict: string; target_rate: number | null };
+  model: string; mode: string; latencyMs: number; modelCalls: number; tokens: { in: number; out: number }; requestTraceId: string | null; facts: { market_rate_per_mile: number; deadhead_miles: number } }
+const VERDICT_STYLE: Record<string, string> = { book: 'bg-emerald-100 text-emerald-800', negotiate: 'bg-amber-100 text-amber-800', ask: 'bg-sky-100 text-sky-800', skip: 'bg-rose-100 text-rose-800' }
+
+// "Should I take it?": the local-model agent decides book / negotiate / ask / skip for this load and your truck.
+function AskAgent({ loadId }: { loadId: string }) {
+  const [busy, setBusy] = useState(false)
+  const [ans, setAns] = useState<AgentAnswer | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const ask = async () => { setBusy(true); setErr(null); const r = await post('/api/agent', { loadId }); setBusy(false); if (r.error && !r.decision) setErr(r.error); else setAns(r) }
+  if (!ans) return (
+    <div className="mt-2 flex items-center gap-2">
+      <Button size="xs" variant="outline" disabled={busy} onClick={ask}>{busy ? 'Thinking… (local model, CPU)' : 'Should I take it?'}</Button>
+      {err && <span className="text-xs text-red-600">{err}</span>}
+    </div>
+  )
+  const d = ans.decision
+  const agrees = d?.verdict === ans.policy.verdict
+  return (
+    <div className="mt-2 rounded-lg border bg-background p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        {d ? <span className={`rounded px-1.5 py-0.5 font-semibold uppercase ${VERDICT_STYLE[d.verdict]}`}>{d.verdict}</span> : <span className="text-red-600">no decision: {ans.error}</span>}
+        {d?.target_rate != null && <span>target <b>${n(d.target_rate)}</b></span>}
+        <span className={agrees ? 'text-emerald-700' : 'text-red-600'}>{agrees ? '✓ matches the policy' : `✗ policy says ${ans.policy.verdict}${ans.policy.target_rate ? ` $${n(ans.policy.target_rate)}` : ''}`}</span>
+      </div>
+      {d && <ul className="mt-1 list-disc pl-4">{d.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>}
+      <div className="mt-1 text-muted-foreground">
+        market ${ans.facts.market_rate_per_mile.toFixed(2)}/mi · deadhead {ans.facts.deadhead_miles} mi · {ans.model} ({ans.mode}) · {(ans.latencyMs / 1000).toFixed(1)} s · {ans.modelCalls} model call{ans.modelCalls === 1 ? '' : 's'} · {n(ans.tokens.in)} / {n(ans.tokens.out)} tokens
+        {ans.requestTraceId && <> · <a className="underline" href={timeline(ans.requestTraceId)} target="_blank">timeline</a></>}
+      </div>
+    </div>
+  )
+}
+
 function Alerts({ alerts }: { alerts: Alert[] }) {
   return (
     <Card className="min-h-0">
@@ -191,6 +225,7 @@ function Alerts({ alerts }: { alerts: Alert[] }) {
                     : x.backfill ? <Badge key={x.loadId} variant="outline">already on the board when you saved</Badge>
                     : <Badge key={x.loadId} variant="destructive">not in answer key</Badge>)}
                 </div>
+                {a.loads.map((x) => <AskAgent key={x.loadId} loadId={x.loadId} />)}
               </div>
             ))}
           </div>

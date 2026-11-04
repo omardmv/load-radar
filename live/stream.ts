@@ -19,7 +19,8 @@ export function createStream(opts: { world: World; clock: Clock; loadsPerDay: nu
   const due = createHeap<Posting & { truth: Truth; kind: string }>((a, b) => a.posted_at < b.posted_at);
   const data: BoardData = new Map();
   const keyToLoad = new Map<string, Truth>();         // "board:board_load_id" -> load (deliveries carry this key)
-  const byAge: { at: number; keys: string[] }[] = [];
+  const byId = new Map<string, Truth>();              // load_id -> load (the agent asks about one load)
+  const byAge: { at: number; keys: string[]; id: string }[] = [];
   const stats = { loads: 0, postings: 0, perBoard: {} as Record<string, number> };
   let last = clock.now();
   let loadsPerDay = opts.loadsPerDay;
@@ -38,7 +39,8 @@ export function createStream(opts: { world: World; clock: Clock; loadsPerDay: nu
       stats.loads++;
       const keys = truth.postings.map((p) => `${p.board}:${p.board_load_id}`);
       for (const key of keys) keyToLoad.set(key, truth);
-      byAge.push({ at: l.posted_at, keys });
+      byId.set(truth.load_id, truth);
+      byAge.push({ at: l.posted_at, keys, id: truth.load_id });
       opts.onLoad(truth);
       postings.forEach((p, i) => due.push({ ...p, truth, kind: truth.postings[i].kind }));
     }
@@ -75,7 +77,7 @@ export function createStream(opts: { world: World; clock: Clock; loadsPerDay: nu
       let i = 0; while (i < list.length && list[i].postedAt < cutoff) i++;
       if (i === list.length) byCell.delete(cell); else if (i) list.splice(0, i);
     }
-    while (byAge.length && byAge[0].at < cutoff) for (const key of byAge.shift()!.keys) keyToLoad.delete(key);
+    while (byAge.length && byAge[0].at < cutoff) { const old = byAge.shift()!; for (const key of old.keys) keyToLoad.delete(key); byId.delete(old.id); }
   }
 
   // A shipper releases a batch: `count` loads out of one market within `windowMs` (tests the hot path).
@@ -88,6 +90,8 @@ export function createStream(opts: { world: World; clock: Clock; loadsPerDay: nu
   return {
     data, tick, prune, burst, stats,
     loadOf: (key: string) => keyToLoad.get(key),
+    loadById: (id: string) => byId.get(id),
+    marketRpm: (t: Truth) => world.expectedRpm(t.origin.market, t.equipment, t.miles, k),   // the agent's market-rate tool
     pending: () => due.size(),
     get loadsPerDay() { return loadsPerDay; },
     setLoadsPerDay(n: number) { loadsPerDay = n; },
