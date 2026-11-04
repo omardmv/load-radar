@@ -175,7 +175,7 @@ function Searches({ saved, setSaved, you }: { saved: Saved[]; setSaved: (f: (s: 
 function Alerts({ alerts }: { alerts: Alert[] }) {
   return (
     <Card className="min-h-0">
-      <CardHeader><CardTitle>Your alerts</CardTitle><CardDescription>What the Telegram bot sent you. Time is US Central (simulated).</CardDescription></CardHeader>
+      <CardHeader><CardTitle>Your alerts</CardTitle><CardDescription>Alerts for your searches. Time is US Central (simulated).</CardDescription></CardHeader>
       <CardContent className="min-h-0">
         <ScrollArea className="h-[calc(100vh-22rem)] pr-3">
           {alerts.length === 0 && <div className="text-sm text-muted-foreground">Nothing yet.</div>}

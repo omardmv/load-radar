@@ -70,3 +70,25 @@ on the wire, ~900 polls wait their turn, and each request takes ~200 ms because 
 engine's single process and core. So each search's area is polled less often and some loads are taken before we see
 them. Next: give the boards their own process and the engine more cores (capacity), and test realistic scale at 1×
 with more logins, since 30× asks each login for 30 requests a second, which no real board allows.
+
+### Scale steps at 1× (2026-11-04): where it breaks
+
+Real speed, 100K loads/day (~60% of DAT), the world on its own thread, 7 min per step (2 warm-up, 5 measured).
+Each dispatcher has ~1.8 board logins; each login may poll once a second.
+
+| Dispatchers (logins) | Alerts ≤ 60 s | Loads alerted | Post → alert p50 / p95 | Board req/s | CPU (cores) | Engine event-loop p99 | Polls waiting for their login |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 300 (523) | 100% | 100% | 2.7 / 6.2 s | 298 | 0.41 | 0.13 s | 1 |
+| 1,000 (1,799) | 100% | 100% | 3.3 / 11.3 s | 954 | 1.03 | 0.50 s | 2,440 |
+| 2,000 (3,603) | 100% | 100% | 3.3 / 14.8 s | 1,882 | 1.29 | 0.44 s | 5,848 |
+| 5,000 (8,950) | **97.3%** (SLO missed) | 100% | **35 / 59 s** | 3,318 | 1.95 | 0.41 s | 13,841 |
+
+- **The knee is between 2,000 and 5,000 dispatchers** on this laptop. Completeness, 429s and bans held at every
+  step; the speed SLO is the first to go.
+- **Bottleneck: the engine thread.** Its event loop runs 0.4–0.5 s late from 1,000 dispatchers on, so each board
+  request takes longer to send and read (at 5,000: 8,676 logins busy ÷ 3,318 req/s ≈ 2.6 s per request), polls queue
+  behind their login, and alerts arrive later. The world thread stays below 0.2 s. More logins, not more freight,
+  is what loads the engine: postings processed rose from 12/s to 134/s only because each login fetches its own copy.
+- **Capacity:** one engine thread handles ~2,000–3,000 board requests per second within the SLOs, about 3,000
+  dispatchers. The next lever is more engine workers, each owning a share of the logins (logins are independent, so
+  this splits cleanly). At that rate 1M requests/s would be ~300–500 such workers.
