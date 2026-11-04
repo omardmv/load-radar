@@ -7,11 +7,11 @@ groups:
     rules:
       # SLO 1: 99% of alerts within 60 s (simulated) of posting.
       - record: slo:alert_fast:ratio_rate5m
-        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le="60"}[5m])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[5m]))
+        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le=~"60(\\.0)?"}[5m])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[5m]))
       - record: slo:alert_fast:ratio_rate1m
-        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le="60"}[1m])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[1m]))
+        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le=~"60(\\.0)?"}[1m])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[1m]))
       - record: slo:alert_fast:ratio_rate1h
-        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le="60"}[1h])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[1h]))
+        expr: sum(rate(post_to_alert_seconds_bucket{job="load-radar-engine",le=~"60(\\.0)?"}[1h])) / sum(rate(post_to_alert_seconds_count{job="load-radar-engine"}[1h]))
 
       # SLO 2: 99% of matching loads that stay on the board 5+ min get an alert.
       - record: slo:alert_complete:ratio_rate5m
