@@ -176,15 +176,40 @@ type AgentAnswer = { decision: { verdict: string; target_rate: number | null; re
   model: string; mode: string; latencyMs: number; modelCalls: number; tokens: { in: number; out: number }; requestTraceId: string | null; facts: { market_rate_per_mile: number; deadhead_miles: number } }
 const VERDICT_STYLE: Record<string, string> = { book: 'bg-emerald-100 text-emerald-800', negotiate: 'bg-amber-100 text-amber-800', ask: 'bg-sky-100 text-sky-800', skip: 'bg-rose-100 text-rose-800' }
 
+// Answers live outside the component, keyed by load: a card re-rendered while the model thinks (a new alert arrived,
+// or it scrolled out and back) picks up the same request instead of losing it.
+const agentRequests = new Map<string, { started: number; answer: Promise<AgentAnswer> }>()
+const askAgent = (loadId: string) => {
+  let r = agentRequests.get(loadId)
+  if (!r) {
+    r = { started: Date.now(), answer: post('/api/agent', { loadId }) }
+    agentRequests.set(loadId, r)
+    r.answer.catch(() => agentRequests.delete(loadId))   // a failed request can be retried
+  }
+  return r
+}
+
 // "Should I take it?": the local-model agent decides book / negotiate / ask / skip for this load and your truck.
 function AskAgent({ loadId }: { loadId: string }) {
-  const [busy, setBusy] = useState(false)
+  const [started, setStarted] = useState<number | null>(() => agentRequests.get(loadId)?.started ?? null)
   const [ans, setAns] = useState<AgentAnswer | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  const ask = async () => { setBusy(true); setErr(null); const r = await post('/api/agent', { loadId }); setBusy(false); if (r.error && !r.decision) setErr(r.error); else setAns(r) }
+  const [, tick] = useState(0)
+  useEffect(() => {
+    if (started === null) return
+    let live = true
+    const timer = setInterval(() => tick((x) => x + 1), 1000)
+    askAgent(loadId).answer
+      .then((r) => { if (!live) return; if (r.error && !r.decision) { setErr(r.error); agentRequests.delete(loadId); setStarted(null) } else setAns(r) })
+      .catch((e) => { if (live) { setErr(`Request failed: ${String(e)}`); setStarted(null) } })
+      .finally(() => clearInterval(timer))
+    return () => { live = false; clearInterval(timer) }
+  }, [loadId, started])
   if (!ans) return (
     <div className="mt-2 flex items-center gap-2">
-      <Button size="xs" variant="outline" disabled={busy} onClick={ask}>{busy ? 'Thinking… (local model, CPU)' : 'Should I take it?'}</Button>
+      <Button size="xs" variant="outline" disabled={started !== null} onClick={() => { setErr(null); setStarted(askAgent(loadId).started) }}>
+        {started !== null ? `Thinking… ${Math.round((Date.now() - started) / 1000)} s (local model, CPU)` : 'Should I take it?'}
+      </Button>
       {err && <span className="text-xs text-red-600">{err}</span>}
     </div>
   )
@@ -214,8 +239,8 @@ function Alerts({ alerts }: { alerts: Alert[] }) {
         <ScrollArea className="h-[calc(100vh-22rem)] pr-3">
           {alerts.length === 0 && <div className="text-sm text-muted-foreground">Nothing yet.</div>}
           <div className="flex flex-col gap-2">
-            {alerts.map((a, i) => (
-              <div key={`${a.at}-${i}`} className="rounded-2xl rounded-tl-sm bg-sky-50 p-3 text-sm dark:bg-sky-950">
+            {alerts.map((a) => (
+              <div key={`${a.at}-${a.loads.map((x) => x.loadId).join(',')}`} className="rounded-2xl rounded-tl-sm bg-sky-50 p-3 text-sm dark:bg-sky-950">
                 {a.lines.map((l, j) => <div key={j}>{l}</div>)}
                 <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                   <span className="tabular-nums">{central(a.at)}</span>

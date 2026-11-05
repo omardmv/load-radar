@@ -41,6 +41,9 @@ services:
     restart: unless-stopped
     ports: ["127.0.0.1:11434:11434"]
     volumes: ["ollama_models:/root/.ollama"]
+    # Keep the agent's model in memory: the default unloads it after 5 idle minutes, and reloading it on this CPU
+    # turned a ~5 s answer into ~28 s. One model at a time, so an eval switching to 7B can't fill the RAM.
+    environment: { OLLAMA_KEEP_ALIVE: "24h", OLLAMA_MAX_LOADED_MODELS: "1" }
 
   # ---------- Observability ----------
   otel-collector:

@@ -168,6 +168,11 @@ createServer((req, res) => {
     async (s) => { await handle(req, res, url, s); s.setAttribute('http.response.status_code', res.statusCode); if (res.statusCode >= 500) s.setStatus({ code: SpanStatusCode.ERROR }); s.end(); });
 }).listen(Number(a.port), '0.0.0.0', () => log('info', 'live.started', { port: Number(a.port), seed, users: users.length, speed: clock.speed }));
 
+// Load the agent's model now, so the first "Should I take it?" doesn't wait ~20 s for it to come off disk.
+fetch(`${a.ollama}/api/generate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: a['agent-model'], keep_alive: '24h' }) })
+  .then((r) => log('info', 'agent.warmed', { model: a['agent-model'], status: r.status }))
+  .catch((e) => log('warn', 'agent.warm_failed', { model: a['agent-model'], error: String(e) }));
+
 async function handle(req: IncomingMessage, res: ServerResponse, url: URL, reqSpan: Span | null) {
   try {
     if (url.pathname === '/metrics') { res.writeHead(200, { 'content-type': reg.contentType }); res.end(await reg.metrics()); return; }
