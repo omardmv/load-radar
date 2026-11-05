@@ -1,5 +1,7 @@
 # Service level objectives
 
+> New to the project? Start with [GUIDE.md](GUIDE.md) (Part 8 covers this document in plain language).
+
 What "working" means for Load Radar, in numbers a dispatcher would care about. Every change is judged against these
 (SRE book, ch. 4). Times are **simulated** seconds: what the dispatcher experiences, whatever the speed slider says.
 

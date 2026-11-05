@@ -1,5 +1,7 @@
 # Deployment
 
+> New to the project? Start with [GUIDE.md](GUIDE.md) (Part 10 covers this document in plain language).
+
 One Linux server ("dev": Ubuntu 24.04, Ryzen 7 3700U 4C/8T, 14 GB RAM, no GPU) runs everything in Docker. The Mac only holds the code and opens the UIs through an SSH tunnel.
 
 ```

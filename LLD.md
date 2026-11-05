@@ -1,5 +1,7 @@
 # Load Radar: low-level design
 
+> New to the project? Start with [GUIDE.md](GUIDE.md) (Parts 3 and 5 cover this document in plain language).
+
 [DESIGN.md](DESIGN.md) is the high-level design: the problem, the constraints, the parts and why they exist. This document is the low-level design: data types, state, APIs, algorithms, failure handling and tests, detailed enough to build from.
 
 Everything here targets the demo (Node/TypeScript) — originally time-boxed to 2 days on one laptop, now built out further and running continuously on a server (DEPLOY.md). Section 13 says what changes in production.

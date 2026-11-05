@@ -2,7 +2,9 @@
 
 A saved-search alert engine for truck dispatchers, built and load-tested on simulated load boards, to answer one question with measurements: **what breaks first at 1000x, and how do you fix it?**
 
-Status: updated 2026-11-04. Originally time-boxed to 2 days on one laptop; most of it is now built and running continuously on a server (README.md §8 has the exact built-vs-designed breakdown).
+Status: updated 2026-11-04. Originally time-boxed to 2 days on one laptop; most of it is now built and running continuously on a server (section 8 below has the built-vs-designed checklist).
+
+> New to the project? Start with [GUIDE.md](GUIDE.md); this document assumes its Parts 1–5.
 
 This is the **high-level design**: the problem, the constraints, the parts and why each exists. The **low-level design** (types, in-memory state, APIs, algorithms, failure handling, tests) is in [LLD.md](LLD.md).
 
@@ -195,7 +197,7 @@ Polling the gated lane is what explodes at scale. **Moving volume into the share
 
 ## 4. Decisions, alternatives and trade-offs
 
-Each row is a choice we made, what we compared it against, and what it costs us. [README.md](README.md) has a plain-language version.
+Each row is a choice we made, what we compared it against, and what it costs us. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has a plain-language summary.
 
 | # | Decision | Why | Alternatives considered | Trade-off we accept |
 | --- | --- | --- | --- | --- |
@@ -298,7 +300,7 @@ Each has a rolling 1-hour error budget and multiwindow burn-rate alerts (`ops/pr
 | **Observability overhead bench** (`bench/overhead/`) | Done | Engine core + 9 observability modes, run pinned on Linux; result +1.0% for the chosen setup |
 | **Board simulator** (`sims/boards-sim.ts`) | Done | Serves postings over HTTP per login, enforces budgets (429s, bans), removes loads once they're taken |
 | **Scorer** (`scorer/score.ts`, and `live/score.ts` for the always-on version) | Done | Compares delivered alerts to the answer key: latency, misses, duplicates, stale alerts |
-| **Load test runs** | Informal, no dedicated suite | Live mode's speed slider, freight-volume buttons and burst button stand in for a step-load harness; pushing them to 120×/100K loads/day found the scheduler bug in section 5 (README "Known issues"). The staged `users ×1, 2, 4, 8…` runs below aren't built as a separate script |
+| **Load test runs** | Informal, no dedicated suite | Live mode's speed slider, freight-volume buttons and burst button stand in for a step-load harness; pushing them to 120×/100K loads/day found the scheduler bug in section 5. The staged `users ×1, 2, 4, 8…` runs below aren't built as a separate script |
 
 Each run records the first SLO to fail and what saturated at that moment: HTTP pool wait, CPU and event-loop lag, heap and GC, queue age, or token buckets.
 
@@ -310,16 +312,16 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 - [x] `docker compose`: OTel Collector, Tempo, Loki, Prometheus, Grafana, GLiNER2, Ollama, Langfuse (self-hosted); runs continuously on the dev server, deployed by cron (DEPLOY.md), not just started locally
 - [x] Board simulator (budgets, 429s, bans, covered loads) and Telegram simulator
 - [x] Scheduler + pollers, normalizer, dedup (rule on Day 1; trained classifier since Day 2), matcher, alert queue, notifier
-- [x] Observability on every stage (lite metrics, own 1% sampling, 1 span per posting) and an end-to-end scored run (README "First end-to-end result")
+- [x] Observability on every stage (lite metrics, own 1% sampling, 1 span per posting) and an end-to-end scored run (README "History: the first end-to-end run")
 
 **Day 2: AI/ML and measurement** (focus: AI/ML + backend/infra)
 - [x] Same-load classifier trained on generator pairs: precision/recall, threshold choice, measured effect on misses and duplicates ([ML.md](ML.md), [ml/dedup/RESULTS.md](ml/dedup/RESULTS.md))
-- [x] Search parser (rules + GLiNER2 / Qwen fallback), 40-example eval set, five contenders compared (ml/parser/RESULTS.md); one known disambiguation bug left open (README "Known issues")
+- [x] Search parser (rules + GLiNER2 / Qwen fallback), 40-example eval set, five contenders compared (ml/parser/RESULTS.md); one known disambiguation bug left open (GUIDE.md §11)
 - [x] LLM observability: OpenTelemetry GenAI spans → self-hosted Langfuse + Tempo (traces) + Loki (logs) + Prometheus span metrics; eval scores attached to each call (OBSERVABILITY.md §8b)
 - [x] Grafana dashboard (`ops/grafana/dashboards/load-radar.json`, provisioned as code) and scorer (batch + the live, rolling version in `live/score.ts`)
 - [ ] Formal load-test harness (step-load runs); live mode's controls stood in instead and found the scheduler bug above
 - [ ] `SCALING.md`: section 5 rewritten with measured numbers
-- [x] README (plain-language guide)
+- [x] README and GUIDE.md (plain-language guide, from zero)
 - [ ] 2-minute video
 
 **Built after the original 2-day plan:**

@@ -1,5 +1,7 @@
 # Load Radar: observability plan
 
+> New to the project? Start with [GUIDE.md](GUIDE.md) (Parts 8 and 10 cover this document in plain language).
+
 How we see problems, take measurements and explain performance. [DESIGN.md](DESIGN.md) says what the system does; [LLD.md](LLD.md) says how. This document says how we **know** it's working, and what to look at when it isn't.
 
 ---

@@ -1,5 +1,7 @@
 # Machine learning in Load Radar
 
+> New to the project? Start with [GUIDE.md](GUIDE.md) (Part 7 covers this document in plain language).
+
 Every model in the system: what it decides, how it was trained, how well it does, where it runs, and what we don't
 know yet. Kept up to date as models change. Raw numbers: [ml/dedup/RESULTS.md](ml/dedup/RESULTS.md),
 [ml/parser/RESULTS.md](ml/parser/RESULTS.md), [ml/agent/RESULTS.md](ml/agent/RESULTS.md).
