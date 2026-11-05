@@ -58,6 +58,16 @@ Answer with JSON: {"verdict": "book"|"negotiate"|"ask"|"skip", "target_rate": nu
 type Msg = { role: string; content: string; tool_calls?: { function: { name: string; arguments: unknown } }[]; tool_name?: string };
 type OllamaReply = { model: string; message: Msg; prompt_eval_count?: number; eval_count?: number };
 
+// Prefill Ollama's prompt cache with the comment-reading instructions. On this CPU reading the ~480-token system
+// prompt takes ~20 s and writing the answer ~2 s; Ollama reuses a cached prompt prefix, so after this every hybrid
+// call only reads its own few-token load comments (~5 s). Same options as the real call, or the cache is dropped.
+export async function warmAgent(url: string, model: string): Promise<number> {
+  const res = await fetch(`${url}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, stream: false, keep_alive: '24h', messages: [{ role: 'system', content: REQ_SYSTEM }, { role: 'user', content: 'Equipment: Van\nComments: (none)' }],
+      options: { temperature: 0, num_ctx: 4096, num_predict: 1 } }) });
+  return res.status;
+}
+
 export async function runAgent(opts: { url: string; model: string; mode: AgentMode; facts: Facts; tracer: Tracer | null; sessionId?: string; metadata?: Record<string, string>; maxSteps?: number }): Promise<AgentRun> {
   const t0 = performance.now();
   const run: AgentRun = { decision: null, requirements: null, error: null, modelCalls: 0, toolCalls: [], inputTokens: 0, outputTokens: 0, latencyMs: 0, traceId: null, steps: [] };
