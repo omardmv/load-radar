@@ -92,3 +92,22 @@ Each dispatcher has ~1.8 board logins; each login may poll once a second.
 - **Capacity:** one engine thread handles ~2,000–3,000 board requests per second within the SLOs, about 3,000
   dispatchers. The next lever is more engine workers, each owning a share of the logins (logins are independent, so
   this splits cleanly). At that rate 1M requests/s would be ~300–500 such workers.
+
+## Live review, 2026-11-04 to 11-06 (30 h at 1×, 300 dispatchers)
+
+| SLO | Measured |
+| --- | --- |
+| Alerts within 60 s | 100% (p50 2.7 s, p99 9.3 s, ~290K alerts) |
+| Loads alerted, open 5+ min | **96–97%, below target the whole time** |
+| Board 429s / banned logins | 0 / 0 (33M requests) |
+
+The completeness miss never paged: burn rate was ~3.5, and the only rule is the fast burn (> 10). Two causes found:
+
+1. **Truckstop names cut at 14 characters didn't resolve** when normalizing changed their length ("FORT LAUDERDAL"
+   -> "FT LAUDERDAL") or the cut landed in an alias ("ONTARIO (INLAN"). ~2,000 Truckstop postings dropped in 30 h.
+   Fixed in the gazetteer: Truckstop place failures 1.38% -> 0.01% on a generated 144K-posting world.
+2. **The live scorer started the clock at the first posting on any board.** A dispatcher whose only copy is a
+   co-broker repost (~10 min later, another board) was counted missed after 15 min, then "late" (611 in 30 h).
+   Fixed in both scorers; on the same eval deliveries p95 latency re-scores 120 s -> 5.3 s.
+
+Still open: misses aren't logged with a reason, there's no slow-burn alert, and no health check from outside the box.

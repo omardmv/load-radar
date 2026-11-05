@@ -91,8 +91,13 @@ against the answer key (`node ml/dedup/compare.ts --data out-eval`):
 
 | Dedup | Missed alerts | Duplicate alerts | p50 / p95 post → alert |
 | --- | --- | --- | --- |
-| Rule | 4.73% (105) | 2.74% (58) | 3.0 / 127 s |
-| **Classifier** | **1.80% (40)** | **0.00% (0)** | 2.9 / 120 s |
+| Rule | 4.73% (105) | 2.74% (58) | 3.0 / 127 s (old clock) |
+| **Classifier** | **1.80% (40)** | **0.00% (0)** | 2.7 / 5.3 s (re-scored; old clock: 2.9 / 120 s) |
+
+Latency is measured from when the load first appears on a board the dispatcher has a login for. Until 2026-11-06 the
+scorer started at the first posting on *any* board, so co-broker reposts (~10 min later, on another board) made the
+p95 look like 120 s. Misses and duplicates don't change with the clock. The rule run's deliveries weren't kept, so
+its latency is still the old number.
 
 ### Why logistic regression and not LightGBM
 
@@ -232,6 +237,10 @@ verdict, so a dispatcher sees why.
 
 ## Changelog
 
+- **2026-11-06** Scorers (batch and live) start the latency clock at the first posting on a board the user can see.
+  Dedup end-to-end p95 re-scored 120 s -> 5.3 s (same deliveries). Normalizer: Truckstop's 14-character names now
+  resolve when normalizing changes their length (Fort/Saint/Mount, dots, a cut on a space) or the cut hits an alias
+  ("ONTARIO (INLAN"); place failures on Truckstop 1.38% -> 0.01% on a 144K-posting world.
 - **2026-11-04** Load-decision agent: four designs evaluated; hybrid (model reads comments, code decides) with prompt v2
   and Qwen 2.5 3B is live.
 - **2026-11-04** Same-load classifier trained and made the default in live mode. Normalizer keeps weight and comments.

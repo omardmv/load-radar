@@ -38,19 +38,23 @@ export function createLiveScore(opts: { users: User[]; watch: string; createdAt:
   rebuild();
 
   function onLoad(t: Truth) {
-    const postedAt = Date.parse(t.first_posted_at);
-    const boards = new Set(t.postings.map((p) => p.board as string));
-    const l: MatchableLoad = { postedAt, equipment: t.equipment, rate: t.rate, miles: t.miles, pickupDate: t.pickup_date,
+    const firstPosted = Date.parse(t.first_posted_at);
+    const coveredAt = coverTime(t.load_id, firstPosted);   // the load is taken on its own clock, whoever sees it
+    const l: MatchableLoad = { postedAt: firstPosted, equipment: t.equipment, rate: t.rate, miles: t.miles, pickupDate: t.pickup_date,
       origin: { ...t.origin, cell4: geohash(t.origin.lat, t.origin.lon, 4) }, dest: { ...t.dest, cell4: geohash(t.dest.lat, t.dest.lon, 4) } };
-    const users = new Map<string, string[]>();
+    // The clock starts when the load first appears on a board this user can see, not on any board: a co-broker
+    // repost ~10 min later on another board can't be alerted sooner than that.
+    const firstSeen = (has: Set<string>) => Math.min(...t.postings.filter((p) => has.has(p.board)).map((p) => Date.parse(p.posted_at)));
+    const users = new Map<string, { postedAt: number; searchIds: string[] }>();
     for (const { spec, boards: has } of index.get(geohash(t.origin.lat, t.origin.lon, 3)) ?? []) {
-      if ((opts.createdAt.get(spec.searchId) ?? 0) > postedAt) continue;   // search made after the load
-      if (![...boards].some((b) => has.has(b)) || !specMatches(spec, l)) continue;
-      const ids = users.get(spec.userId);
-      if (ids) ids.push(spec.searchId); else users.set(spec.userId, [spec.searchId]);
+      const postedAt = firstSeen(has);
+      if (!Number.isFinite(postedAt) || !specMatches(spec, l)) continue;           // not on any of the user's boards
+      if ((opts.createdAt.get(spec.searchId) ?? 0) > postedAt) continue;            // search made after the load
+      const u = users.get(spec.userId);
+      if (u) u.searchIds.push(spec.searchId); else users.set(spec.userId, { postedAt, searchIds: [spec.searchId] });
     }
-    for (const [userId, searchIds] of users) {
-      pending.set(`${userId}|${t.load_id}`, { userId, loadId: t.load_id, postedAt, coveredAt: coverTime(t.load_id, postedAt), searchIds });
+    for (const [userId, { postedAt, searchIds }] of users) {
+      pending.set(`${userId}|${t.load_id}`, { userId, loadId: t.load_id, postedAt, coveredAt, searchIds });
       count(userId, (c) => c.expected++);
     }
   }

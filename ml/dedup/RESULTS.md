@@ -22,4 +22,6 @@ Data: `out-eval` (seed 1, never seen in training), 1.5 real minutes at 60× spee
 | Dedup | Expected alerts | Delivered | Missed | Duplicates | Unexpected | p50 / p95 latency |
 | --- | --- | --- | --- | --- | --- | --- |
 | rule | 2219 | 2114 | 4.73% (105 open 5+ min) | 58 (2.74%) | 284 | 3.0 / 127.5 s |
-| classifier | 2219 | 2179 | 1.80% (40 open 5+ min) | 0 (0.00%) | 302 | 2.9 / 120.1 s |
+| classifier | 2219 | 2179 | 1.80% (30 open 5+ min) | 0 (0.00%) | 302 | 2.7 / 5.3 s |
+
+Re-scored 2026-11-06 with the latency clock starting at the first posting on a board the user can see (old clock: 2.9 / 120.1 s, 40 open 5+ min). The rule row is on the old clock; its deliveries weren't kept.

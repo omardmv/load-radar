@@ -24,7 +24,14 @@ export function loadGazetteer(dataDir: string): (city: string, state: string) =>
     n = ALIASES[n] ?? n;
     const hit = exact.get(`${n}|${state}`);
     if (hit) return hit;
-    if (n.length === 14) for (const [name, p] of byState.get(state) ?? []) if (name.startsWith(n)) return p;
-    return null;
+    // Truckstop cuts names at 14 characters. Decide that on the raw text: normalizing changes the length
+    // ("FORT LAUDERDAL" -> "FT LAUDERDAL", dots dropped, a cut that ends on a space is trimmed).
+    if (city.length !== 14 || !n) return null;
+    const prefix = /\s$/.test(city) ? `${n} ` : n;   // cut on a space: the next word must start there
+    const alias = Object.keys(ALIASES).find((a) => a.length > 14 && a.startsWith(prefix));   // "ONTARIO (INLAN"
+    if (alias) { const p = exact.get(`${ALIASES[alias]}|${state}`); if (p) return p; }
+    let best: [string, PlaceHit] | null = null;      // several towns share a prefix: take the shortest name
+    for (const e of byState.get(state) ?? []) if (e[0].startsWith(prefix) && (!best || e[0].length < best[0].length)) best = e;
+    return best ? best[1] : null;
   };
 }

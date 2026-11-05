@@ -539,7 +539,7 @@ Decision (2026-11-04): the project keeps **no automated unit or integration test
 
 Trade-off: a regression is noticed when a scored run or an eval gets worse, not at the moment the code changes. The scorer is what caught the Day 1 entitlement bug (misses 68% → 3.6% after the fix).
 
-**Scorer:** for each `(user, load)` that the answer key says should alert, given the user's searches, the load's true attributes and the user's credentials, it finds the first delivery. It reports latency (delivery time minus true first posting), misses, duplicates and stale alerts. Expected matches use the same filters as the matcher, in a plain cell-indexed implementation that's easy to check by hand. It avoids comparing every load with every search (2 billion pairs at 100K × 20K).
+**Scorer:** for each `(user, load)` that the answer key says should alert, given the user's searches, the load's true attributes and the user's credentials, it finds the first delivery. It reports latency (delivery time minus the load's first posting on a board that user has a login for; a co-broker repost on another board ~10 min later can't be alerted sooner), misses, duplicates and stale alerts. Expected matches use the same filters as the matcher, in a plain cell-indexed implementation that's easy to check by hand. It avoids comparing every load with every search (2 billion pairs at 100K × 20K).
 
 ## 16. Repo layout
 
