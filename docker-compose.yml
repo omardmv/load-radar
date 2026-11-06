@@ -20,11 +20,12 @@ services:
   live:
     build: { context: ., dockerfile: live/Dockerfile }
     restart: unless-stopped
-    # Scale steps without a code change: LIVE_USERS=2000 LIVE_LOADS_PER_DAY=100000 docker compose up -d live
+    # Scale steps without a code change: LIVE_USERS=2000 LIVE_LOADS_PER_DAY=100000 LIVE_ENGINE_WORKERS=2 docker compose up -d live
     command: ["--port", "8080", "--speed", "1", "--loads-per-day", "${LIVE_LOADS_PER_DAY:-20000}", "--users", "${LIVE_USERS:-300}",
               "--gliner", "http://gliner2:7100", "--otlp", "http://otel-collector:4318/v1/traces", "--state", "/state",
               "--dedup-model", "ml/dedup/model.json",   # trained same-load classifier (ML.md); drop the flag to use the rule
-              "--ollama", "http://ollama:11434", "--agent-model", "qwen2.5:3b-instruct", "--agent-mode", "hybrid"]   # "Should I take it?" agent (ml/agent)
+              "--ollama", "http://ollama:11434", "--agent-model", "qwen2.5:3b-instruct", "--agent-mode", "hybrid",
+              "--engine-workers", "${LIVE_ENGINE_WORKERS:-0}"]   # 0: engine on the main thread; N: N shards, one core each   # "Should I take it?" agent (ml/agent)
     ports: ["127.0.0.1:8080:8080"]
     volumes: ["live_state:/state"]          # your saved searches survive restarts and deploys
     depends_on: [gliner2, otel-collector, ollama]

@@ -27,7 +27,7 @@ groups:
       - record: slo:board_not_limited:ratio_rate1h
         expr: 1 - (sum(rate(upstream_requests_total{job="load-radar-engine",status="429"}[1h])) or vector(0)) / sum(rate(upstream_requests_total{job="load-radar-engine"}[1h]))
       - record: slo:logins_banned
-        expr: max(engine_gauge{job="load-radar-engine",name="logins_banned"})
+        expr: sum(engine_gauge{job="load-radar-engine",name="logins_banned"})
 
   - name: slo-budget
     interval: 15s
