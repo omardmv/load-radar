@@ -60,6 +60,8 @@ setInterval(() => {
   fetch(`${a.sink}/alerts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }).then((r) => r.arrayBuffer()).catch(() => {});
 }, 250);
 
+// Same hash as the sink: only loads in the sample are sent, so the sink's CPU stays off the measurement.
+const sampled = (id: string) => { let h = 2166136261; for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) % 10 === 0; };
 type Push = { board: Board; raw: unknown; load_id: string; sent_at: number };
 createServer((req, res) => {
   if (req.method !== 'POST' || req.url !== '/loads') { res.writeHead(404); res.end(); return; }
@@ -79,7 +81,7 @@ createServer((req, res) => {
         const k = `${user}|${load.canonicalId}`;
         if (alerted.has(k)) continue;
         alerted.add(k);
-        batch.push({ user, load: p.load_id, sentAt: p.sent_at, worker });
+        if (sampled(p.load_id)) batch.push({ user, load: p.load_id, sentAt: p.sent_at, worker });   // the sink scores a 1-in-10 sample
         alertsC.inc();
       }
     }

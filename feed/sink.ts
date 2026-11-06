@@ -10,7 +10,7 @@ import client from 'prom-client';
 const { values: a } = parseArgs({ options: { port: { type: 'string', default: '7300' }, 'metrics-port': { type: 'string', default: '9464' } } });
 const reg = new client.Registry();
 client.collectDefaultMetrics({ register: reg });
-const alerts = new client.Counter({ name: 'feed_sink_alerts_total', help: 'alerts received, all', registers: [reg] });
+const alerts = new client.Counter({ name: 'feed_sink_alerts_total', help: 'alerts received (workers send a 1-in-10 sample of loads)', registers: [reg] });
 const sampled = new client.Counter({ name: 'feed_sink_sampled_total', help: 'alerts in the 1-in-10 duplicate sample', labelNames: ['kind'], registers: [reg] });
 const latency = new client.Histogram({ name: 'feed_alert_seconds', help: 'partner sent the posting -> alert reached the sink', registers: [reg], buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60] });
 sampled.inc({ kind: 'first' }, 0); sampled.inc({ kind: 'duplicate' }, 0);

@@ -36,12 +36,12 @@ services:
   feed-ingest:
     build: { context: ., dockerfile: live/Dockerfile }
     profiles: [feed]
-    entrypoint: ["node", "feed/ingest.ts", "--port", "7200", "--metrics-port", "9464", "--sink", "http://feed-sink:7300", "--users", "200"]
+    entrypoint: ["node", "feed/ingest.ts", "--port", "7200", "--metrics-port", "9464", "--sink", "http://feed-sink:7300", "--users", "${FEED_USERS:-2000}"]
     cpus: 1                                  # one core per worker, enforced
   feed-lb:
     image: nginx:1.29-alpine
     profiles: [feed]
-    volumes: ["./feed/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    volumes: ["./feed/nginx.conf:/etc/nginx/nginx.conf:ro", "./feed/upstreams.conf:/etc/nginx/upstreams.conf:ro"]
     depends_on: [feed-ingest]
   feed-sink:
     build: { context: ., dockerfile: live/Dockerfile }

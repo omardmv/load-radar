@@ -11,6 +11,7 @@ for step in "$@"; do
   w=${step%%:*}; lb=${step##*:}; port=$([ "$lb" = rr ] && echo 8090 || echo 8091)
   dc docker compose --profile feed stop feed-gen
   dc docker compose --profile feed up -d --force-recreate --scale feed-ingest=$w feed-ingest feed-sink
+  ssh dev "cd ~/load-radar && { echo '# written by scripts/feed-steps.sh'; for i in \$(seq 1 $w); do echo \"server load-radar-feed-ingest-\$i:7200;\"; done; } > feed/upstreams.conf" 2>/dev/null
   dc docker compose --profile feed up -d --force-recreate --no-deps feed-lb   # --no-deps: else compose resets feed-ingest to 1 replica
   sleep 5
   echo "  ingest replicas: $(ssh dev "cd ~/load-radar && docker compose --profile feed ps -q feed-ingest | wc -l" 2>/dev/null)"
@@ -26,10 +27,11 @@ for step in "$@"; do
   echo "  generator CPU         $(q 'max(rate(process_cpu_seconds_total{job="feed-gen"}[4m]))')"
   echo "  push p50 / p99 s      $(q 'histogram_quantile(0.5, sum by (le) (rate(feed_gen_request_seconds_bucket[4m])))') / $(q 'histogram_quantile(0.99, sum by (le) (rate(feed_gen_request_seconds_bucket[4m])))')"
   echo "  push errors /s        $(q 'sum(rate(feed_gen_requests_total{status!="202"}[4m])) or vector(0)')"
-  echo "  alerts/s              $(q 'sum(rate(feed_sink_alerts_total[4m]))')"
+  echo "  alerts/s              $(q 'sum(rate(feed_alerts_emitted_total[4m]))')"
   echo "  alert p50 / p99 s     $(q 'histogram_quantile(0.5, sum by (le) (rate(feed_alert_seconds_bucket[4m])))') / $(q 'histogram_quantile(0.99, sum by (le) (rate(feed_alert_seconds_bucket[4m])))')"
   echo "  duplicate alerts      $(q 'sum(increase(feed_sink_sampled_total{kind="duplicate"}[4m])) / sum(increase(feed_sink_sampled_total[4m]))')"
 done
 dc docker compose --profile feed stop feed-gen feed-lb feed-ingest feed-sink
+ssh dev "cd ~/load-radar && git checkout feed/upstreams.conf" 2>/dev/null
 dc docker compose up -d live
 echo "feed stopped, live restarted $(date +%H:%M:%S)"
