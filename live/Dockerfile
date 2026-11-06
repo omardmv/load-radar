@@ -14,6 +14,7 @@ COPY src src
 COPY sim sim
 COPY sims sims
 COPY live live
+COPY feed feed
 COPY ml/dedup/model.json ml/dedup/model.json
 COPY --from=ui /ui/dist ui/dist
 EXPOSE 8080 9464

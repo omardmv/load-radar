@@ -30,6 +30,29 @@ services:
     volumes: ["live_state:/state"]          # your saved searches survive restarts and deploys
     depends_on: [gliner2, otel-collector, ollama]
 
+  # ---------- Partner push feed (on demand: scripts/feed-steps.sh) ----------
+  # Partners push each posting to nginx, which spreads them over N ingest workers, one core each (DESIGN.md §3.5).
+  #   docker compose --profile feed up -d --scale feed-ingest=2
+  feed-ingest:
+    build: { context: ., dockerfile: live/Dockerfile }
+    profiles: [feed]
+    entrypoint: ["node", "feed/ingest.ts", "--port", "7200", "--metrics-port", "9464", "--sink", "http://feed-sink:7300", "--users", "200"]
+    cpus: 1                                  # one core per worker, enforced
+  feed-lb:
+    image: nginx:1.29-alpine
+    profiles: [feed]
+    volumes: ["./feed/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    depends_on: [feed-ingest]
+  feed-sink:
+    build: { context: ., dockerfile: live/Dockerfile }
+    profiles: [feed]
+    entrypoint: ["node", "feed/sink.ts", "--port", "7300", "--metrics-port", "9464"]
+  feed-gen:
+    build: { context: ., dockerfile: live/Dockerfile }
+    profiles: [feed]
+    entrypoint: ["node", "feed/push-gen.ts", "--target", "${FEED_TARGET:-http://feed-lb:8091}", "--threads", "2", "--concurrency", "128", "--metrics-port", "9464"]
+    depends_on: [feed-lb]
+
   # ---------- Models for the search parser ----------
   gliner2:
     build: ./ml/parser

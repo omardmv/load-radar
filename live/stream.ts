@@ -11,7 +11,7 @@ import { HOURLY, centralHour, type Equip, type Posting, type Truth, type World }
 const HOURLY_SUM = HOURLY.reduce((a, b) => a + b, 0);
 const KEEP_MS = 6 * 3_600_000;                       // board history kept (simulated time)
 
-export type Released = { board: string; at: number; loadId: string; kind: string; truth: Truth };
+export type Released = { board: string; at: number; loadId: string; kind: string; truth: Truth; raw: unknown };
 
 export function createStream(opts: { world: World; clock: Clock; loadsPerDay: number; onLoad(t: Truth): void; onPosting(p: Released): void }) {
   const { world, clock } = opts;
@@ -67,7 +67,7 @@ export function createStream(opts: { world: World; clock: Clock; loadsPerDay: nu
       if (list) list.push(item); else byCell.set(cell, [item]);
       stats.postings++;
       stats.perBoard[p.board] = (stats.perBoard[p.board] ?? 0) + 1;
-      opts.onPosting({ board: p.board, at: p.posted_at, loadId: t.load_id, kind: p.kind, truth: t });
+      opts.onPosting({ board: p.board, at: p.posted_at, loadId: t.load_id, kind: p.kind, truth: t, raw: p.raw });
     }
   }
 
