@@ -11,7 +11,8 @@ for step in "$@"; do
   w=${step%%:*}; lb=${step##*:}; port=$([ "$lb" = rr ] && echo 8090 || echo 8091)
   dc docker compose --profile feed stop feed-gen
   dc docker compose --profile feed up -d --force-recreate --scale feed-ingest=$w feed-ingest feed-sink
-  ssh dev "cd ~/load-radar && { echo '# written by scripts/feed-steps.sh'; for i in \$(seq 1 $w); do echo \"server load-radar-feed-ingest-\$i:7200;\"; done; } > feed/upstreams.conf" 2>/dev/null
+  # One server line per running replica, by its real container name (recreating renumbers them).
+  ssh dev "cd ~/load-radar && docker compose --profile feed ps --format '{{.Name}}' feed-ingest | sed 's/.*/server &:7200;/' > feed/upstreams.conf" 2>/dev/null
   dc docker compose --profile feed up -d --force-recreate --no-deps feed-lb   # --no-deps: else compose resets feed-ingest to 1 replica
   sleep 5
   echo "  ingest replicas: $(ssh dev "cd ~/load-radar && docker compose --profile feed ps -q feed-ingest | wc -l" 2>/dev/null)"
