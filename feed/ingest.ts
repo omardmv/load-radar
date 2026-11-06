@@ -63,7 +63,7 @@ setInterval(() => {
 // Same hash as the sink: only loads in the sample are sent, so the sink's CPU stays off the measurement.
 const sampled = (id: string) => { let h = 2166136261; for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) % 10 === 0; };
 type Push = { board: Board; raw: unknown; load_id: string; sent_at: number };
-createServer((req, res) => {
+const server = createServer((req, res) => {
   if (req.method !== 'POST' || req.url !== '/loads') { res.writeHead(404); res.end(); return; }
   const chunks: Buffer[] = [];
   req.on('data', (c: Buffer) => chunks.push(c));
@@ -89,4 +89,9 @@ createServer((req, res) => {
     reqs.inc({ result: n.ok ? 'ok' : 'bad' });
     res.writeHead(202); res.end();
   });
-}).listen(Number(a.port), '0.0.0.0', () => console.log(`ingest ${worker} on :${a.port}, ${users.length} dispatchers, ${matcher.indexEntries} index entries`));
+});
+// Keep idle connections longer than nginx does (its upstream keepalive_timeout is 60 s): with Node's default 5 s the
+// worker closed connections nginx was about to reuse, and every reset counted as a failure of that worker.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+server.listen(Number(a.port), '0.0.0.0', () => console.log(`ingest ${worker} on :${a.port}, ${users.length} dispatchers, ${matcher.indexEntries} index entries`));
