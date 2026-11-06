@@ -15,12 +15,12 @@ import { createFakeClock } from '../src/shared/clock.ts';
 import { createWorld } from '../sim/world.ts';
 import { createStream, type Released } from '../live/stream.ts';
 
-type Opts = { target: string; concurrency: number; metricsPort: number; seed: number };
+type Opts = { target: string; concurrency: number; metricsPort: number; seed: number; rate: number };
 if (isMainThread) {
   const { values: a } = parseArgs({ options: { target: { type: 'string', default: 'http://127.0.0.1:8091' }, threads: { type: 'string', default: '1' },
-    concurrency: { type: 'string', default: '128' }, 'metrics-port': { type: 'string', default: '9464' }, seed: { type: 'string', default: '11' } } });
+    concurrency: { type: 'string', default: '128' }, 'metrics-port': { type: 'string', default: '9464' }, seed: { type: 'string', default: '11' }, rate: { type: 'string', default: '0' } } });
   for (let i = 0; i < Number(a.threads); i++) {
-    new Worker(new URL(import.meta.url), { workerData: { target: a.target!, concurrency: Number(a.concurrency), metricsPort: Number(a['metrics-port']) + i, seed: Number(a.seed) + i * 1000 } satisfies Opts });
+    new Worker(new URL(import.meta.url), { workerData: { target: a.target!, concurrency: Number(a.concurrency), metricsPort: Number(a['metrics-port']) + i, seed: Number(a.seed) + i * 1000, rate: Number(a.rate) } satisfies Opts });
   }
   console.log(`push-gen: ${a.threads} threads x ${a.concurrency} in flight -> ${a.target}`);
 } else {
@@ -45,20 +45,28 @@ if (isMainThread) {
     return outbox[read++];
   };
 
-  const url = new URL(o.target);
-  const agent = new Agent({ keepAlive: true, maxSockets: o.concurrency });
+  // One target: a load balancer. Several (comma-separated): we pick the worker ourselves by hashing the route key
+  // (client-side sharding, used to check the load balancer against a known-good router).
+  const urls = o.target.split(',').map((x) => new URL(x));
+  const agents = urls.map(() => new Agent({ keepAlive: true, maxSockets: o.concurrency }));
+  const fnv = (s: string) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+  // --rate N: at most N postings/s from this thread (0 = as fast as the target answers).
+  let nextAt = performance.now();
+  const pace = async () => { if (!o.rate) return; nextAt = Math.max(nextAt + 1000 / o.rate, performance.now() - 1000); const w = nextAt - performance.now(); if (w > 0) await new Promise((r) => setTimeout(r, w)); };
   const send = (p: Released) => new Promise<void>((resolve) => {
     const t = p.truth;
+    const routeKey = `${t.origin.state}|${t.dest.state}|${t.pickup_date}|${t.equipment}`;
+    const i = urls.length > 1 ? fnv(routeKey) % urls.length : 0, url = urls[i], agent = agents[i];
     const body = JSON.stringify({ board: p.board, raw: p.raw, load_id: `${o.seed}-${t.load_id}`, sent_at: Date.now() });   // each thread's world numbers loads from 1
     const t0 = performance.now();
     const req = request({ host: url.hostname, port: url.port, path: '/loads', method: 'POST', agent,
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-route-key': `${t.origin.state}|${t.dest.state}|${t.pickup_date}|${t.equipment}` } }, (res) => {
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-route-key': routeKey } }, (res) => {
       res.resume();
       res.on('end', () => { sent.inc({ status: String(res.statusCode) }); sec.observe((performance.now() - t0) / 1000); resolve(); });
     });
     req.on('error', () => { sent.inc({ status: 'error' }); setTimeout(resolve, 100); });
     req.end(body);
   });
-  const lane = async () => { for (;;) await send(next()); };
+  const lane = async () => { for (;;) { await pace(); await send(next()); } };
   for (let i = 0; i < o.concurrency; i++) void lane();
 }

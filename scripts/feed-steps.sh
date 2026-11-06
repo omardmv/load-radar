@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Push-feed scale test, run from the Mac over SSH: N ingest workers (one core each) behind nginx, fed as fast as
-# they accept. Each step is "workers:lb", lb = hash (port 8091, same load -> same worker) or rr (8090, round robin).
+# they accept. Each step is "workers:lb", lb = hash (port 8091, same load -> same worker), rr (8090, round robin)
+# or direct (no nginx: the generator hashes the route key to a worker itself; a known-good router to compare with).
 # Fresh workers, sink and generator every step; 1 min warm-up, 4 min measured. Live mode is stopped meanwhile.
 #   scripts/feed-steps.sh 1:hash 2:hash 3:hash 3:rr
 set -uo pipefail
@@ -8,7 +9,7 @@ dc() { ssh dev "cd ~/load-radar && $*" >/dev/null 2>&1; }
 q() { ssh dev "curl -s --get localhost:9090/api/v1/query --data-urlencode 'query=$1'" 2>/dev/null | python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(round(float(r[0]["value"][1]),4) if r else "n/a")'; }
 dc docker compose stop live
 for step in "$@"; do
-  w=${step%%:*}; lb=${step##*:}; port=$([ "$lb" = rr ] && echo 8090 || echo 8091)
+  w=${step%%:*}; lb=${step##*:}; port=$([ "$lb" = rr ] && echo 8090 || echo 8091)   # lb=direct: the generator hashes to the workers itself, no nginx
   dc docker compose --profile feed stop feed-gen
   dc docker compose --profile feed up -d --force-recreate --scale feed-ingest=$w feed-ingest feed-sink
   # One server line per running replica, by its real container name (recreating renumbers them).
@@ -16,7 +17,9 @@ for step in "$@"; do
   dc docker compose --profile feed up -d --force-recreate --no-deps feed-lb   # --no-deps: else compose resets feed-ingest to 1 replica
   sleep 5
   echo "  ingest replicas: $(ssh dev "cd ~/load-radar && docker compose --profile feed ps -q feed-ingest | wc -l" 2>/dev/null)"
-  dc FEED_TARGET=http://feed-lb:$port docker compose --profile feed up -d --force-recreate --no-deps feed-gen
+  target=http://feed-lb:$port
+  [ "$lb" = direct ] && target=$(ssh dev "cd ~/load-radar && docker compose --profile feed ps --format '{{.Name}}' feed-ingest | sed 's|.*|http://&:7200|' | paste -sd, -" 2>/dev/null)
+  dc FEED_TARGET=$target docker compose --profile feed up -d --force-recreate --no-deps feed-gen
   start=$(date +%s); echo "STEP workers=$w lb=$lb started $(date -r $start +%H:%M:%S)"
   sleep 300
   echo "  window $(date -r $((start+60)) +%H:%M:%S) - $(date +%H:%M:%S)"
