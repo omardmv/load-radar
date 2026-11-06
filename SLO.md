@@ -95,6 +95,57 @@ Each dispatcher has ~1.8 board logins; each login may poll once a second.
   dispatchers. The next lever is more engine workers, each owning a share of the logins (logins are independent, so
   this splits cleanly). At that rate 1M requests/s would be ~300–500 such workers.
 
+### Scale-out: 1 vs 2 engine workers (2026-11-07)
+
+`--engine-workers N` splits the engine into N threads, each owning 1/N of the dispatchers (their logins, alerts and
+chats), so the shards share nothing. Same world for both runs: 8,000 dispatchers (more than one thread can serve),
+100K loads/day, 1x, 2 min warm-up, 5 min measured (`scripts/core-steps.sh`). The 4 Telegram bots are split between
+the workers, so delivery capacity is the same in both runs.
+
+| | 1 worker | 2 workers | 2 workers, 12,000 dispatchers |
+| --- | --- | --- | --- |
+| Board requests/s | 3,745 | **6,617** (1.77x) | 6,098 |
+| Process CPU (cores) | 1.9 | 3.5 | 3.4 |
+| Alerts within 60 s | 34.6% | 84.5% | 32.3% |
+| Post -> alert p50 / p95 | 86 / 267 s | 39 / 102 s | 91 / 272 s |
+| Engine event-loop p99 | 0.96 s | 1.39 s | 1.43 s |
+| World thread event-loop p99 | 0.16 s | **0.78 s** | 0.38 s |
+| 429s / bans | 0 / 0 | 0 / 0 | 0 / 0 |
+
+- A second worker gives 1.77x the requests on the same load. CPU above one core is the proof the two threads ran in
+  parallel (one thread can't use more than one core).
+- Not 2x because the simulated boards share the same 4 cores: their thread went from 0.16 s to 0.78 s late.
+- The machine's ceiling is ~6,100-6,600 board requests/s: 12,000 dispatchers didn't get more through. 8,000 is still
+  beyond 2 workers (84.5%, not 99%), so the SLO-safe capacity is roughly 2x the single-thread ~3,000 dispatchers.
+- Not tested: workers on separate machines, a worker dying and its logins moving (that needs leases, LLD section 12).
+
+### Push feed behind a load balancer (2026-11-07)
+
+The shared lane (DESIGN.md 3.5): partners push each posting as one HTTP POST to nginx, which spreads them over N
+ingest workers capped at **one core each** (`cpus: 1`). 2,000 dispatchers' searches in every worker, generator sending
+as fast as it's answered, 1 min warm-up, 4 min measured (`scripts/feed-steps.sh`). Live mode stopped meanwhile.
+
+| | 1 worker | 2 workers, hash | 3 workers, hash | 3 workers, round robin |
+| --- | --- | --- | --- | --- |
+| Postings/s handled | 2,008 | **2,917** (1.45x) | **3,567** (1.78x) | 3,306 |
+| CPU per worker (max) | 1.00 | 0.89 | 0.90 | 0.86 |
+| Dedup said "new" | 37.6% | 40.0% | 38.9% | **62.7%** |
+| Alerts per posting | 14.1 | 15.0 | 14.2 | **22.9** |
+| Duplicate alerts (1-in-10 sample of loads) | 2.5% | 9.6% | 8.1% | **42.1%** |
+| Alert p50 / p99 | 0.39 / 2.2 s | 0.30 / 1.3 s | 0.21 / 1.0 s | 0.21 / 1.6 s |
+
+- **Throughput scales with workers**: 1.45x with 2, 1.78x with 3. With 2+ workers none is at its 1-core cap: the
+  generator (1.0-1.3 cores) and nginx share the same 4 cores, so the box runs out before the workers do.
+- **Routing must follow the state.** Each worker deduplicates in its own memory. Hashing on the load's lane key sends
+  every copy of a load to one worker, and dedup behaves as with one worker (38-40% new). Round robin scatters the
+  copies: dedup sees 63% "new", and dispatchers get 42% duplicate alerts.
+- Hash routing still shows more sampled duplicates than one worker (8-10% vs 2.5%) while dedup's "new" share and
+  alerts per posting barely move. Not explained yet; the sink's sample is the next thing to check.
+- **Bug found on the way:** `server feed-ingest:7200` (one name resolving to every replica) made nginx's `hash`
+  rotate through the addresses: 300 requests with one key went 100/100/100, and hash and round robin both gave 44%
+  duplicates. One `server` line per replica fixed it (probe: 0/0/300).
+- In production a partner won't send our routing key; a stateless edge tier (or Kafka's partition key) computes it.
+
 ## Live review, 2026-11-04 to 11-06 (30 h at 1×, 300 dispatchers)
 
 | SLO | Measured |

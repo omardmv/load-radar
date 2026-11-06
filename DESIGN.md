@@ -183,6 +183,18 @@ Polling the gated lane is what explodes at scale. **Moving volume into the share
 
 **Notifier.** Token buckets enforce ~30 msg/s per bot and ~1 msg/s per chat. When one chat has several pending alerts, they're merged into one digest. It supports several bots and channels (in-app push, Telegram, email).
 
+### 3.5 Scaling out: engine workers and the push feed (measured, SLO.md)
+
+**Polling lane: shard by dispatcher.** `--engine-workers N` runs the engine as N threads, each owning 1/N of the
+dispatchers with their logins, rate limits, "already alerted" memory and Telegram chats. Nothing is shared, so no
+load balancer is needed: the work is polls the worker creates itself. Measured: a second worker gives 1.77x the board
+requests on the same load (3,745 -> 6,617/s on the 4-core server).
+
+**Push lane: a load balancer that routes by the load.** Partners push postings to nginx, which spreads them over N
+ingest workers (one core each). Dedup memory lives in each worker, so nginx hashes on a lane key (origin state,
+destination state, pickup date, equipment) that every copy of a load shares. Round robin is the wrong default here:
+measured 42% duplicate alerts vs 8% with hash routing. Throughput 2,008 -> 3,567 postings/s from 1 to 3 workers.
+
 ### 3.4 One posting's journey
 
 > 9:02:10. A broker posts a Chicago → Atlanta van load, $1,950, on DAT, picking up today.
@@ -248,7 +260,7 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 
 | Stage | Example size | Runs as | Next limit | Response |
 | --- | --- | --- | --- | --- |
-| Today (measured, SLO.md) | 2,000 dispatchers (3,600 logins) within all SLOs on one engine thread; the speed SLO breaks at 5,000 | One engine thread, in-memory state; the simulated world on its own thread | The engine thread's CPU (event loop 0.4–0.5 s late from 1,000 dispatchers) | Engine workers, each owning a share of the logins |
+| Today (measured, SLO.md) | 2,000 dispatchers (3,600 logins) within all SLOs on one engine thread; the speed SLO breaks at 5,000. With 2 engine workers: 1.77x the board requests (6,617/s) | Engine workers (threads), each owning a share of the dispatchers; the simulated world on its own thread | The 4-core machine (the simulator shares it) | Workers on more machines, with leases for login ownership |
 | 10x | ~50,000 customers | + worker threads partitioned by login | One CPU core (JSON parsing of responses) | Threads, then processes |
 | 100x | ~500,000 customers | Several machines, each owning partitions (login / cell / user) | Telegram delivery; memory per machine | Push as main channel, more bots; compact state |
 | 1000x | ~5M customers | Many machines, partitions connected by Kafka; snapshots + log replay | Login budgets as a business limit | Shared and partner feeds wherever possible |
