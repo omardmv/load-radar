@@ -193,7 +193,9 @@ requests on the same load (3,745 -> 6,617/s on the 4-core server).
 **Push lane: a load balancer that routes by the load.** Partners push postings to nginx, which spreads them over N
 ingest workers (one core each). Dedup memory lives in each worker, so nginx hashes on a lane key (origin state,
 destination state, pickup date, equipment) that every copy of a load shares. Round robin is the wrong default here:
-measured 42% duplicate alerts vs 8% with hash routing. Throughput 2,008 -> 3,567 postings/s from 1 to 3 workers.
+measured 43% duplicate alerts vs 2% with hash routing. Throughput 2,050 -> 3,346 postings/s from 1 to 3 workers.
+Two nginx details matter for stateful routing: one `server` line per worker (a name resolving to several addresses
+isn't hashed between them), and `max_fails=0` (otherwise one failed request moves a worker's loads elsewhere for 10 s).
 
 ### 3.4 One posting's journey
 

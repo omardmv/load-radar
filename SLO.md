@@ -127,23 +127,26 @@ as fast as it's answered, 1 min warm-up, 4 min measured (`scripts/feed-steps.sh`
 
 | | 1 worker | 2 workers, hash | 3 workers, hash | 3 workers, round robin |
 | --- | --- | --- | --- | --- |
-| Postings/s handled | 2,008 | **2,917** (1.45x) | **3,567** (1.78x) | 3,306 |
-| CPU per worker (max) | 1.00 | 0.89 | 0.90 | 0.86 |
-| Dedup said "new" | 37.6% | 40.0% | 38.9% | **62.7%** |
-| Alerts per posting | 14.1 | 15.0 | 14.2 | **22.9** |
-| Duplicate alerts (1-in-10 sample of loads) | 2.5% | 9.6% | 8.1% | **42.1%** |
-| Alert p50 / p99 | 0.39 / 2.2 s | 0.30 / 1.3 s | 0.21 / 1.0 s | 0.21 / 1.6 s |
+| Postings/s handled | 2,050 | **2,935** (1.43x) | **3,346** (1.63x) | 3,250 |
+| CPU per worker (max) | 1.00 | 0.97 | 0.95 | 0.85 |
+| Alerts per posting | 14.5 | 13.6 | 13.1 | **22.5** |
+| Duplicate alerts (1-in-10 sample of loads) | 2.7% | 2.2% | 1.7% | **43.4%** |
+| Alert p50 / p99 | 0.40 / 1.5 s | 0.30 / 1.0 s | 0.24 / 1.0 s | 0.22 / 1.4 s |
+| Push errors | 0 | 0 | 0 | 0 |
 
-- **Throughput scales with workers**: 1.45x with 2, 1.78x with 3. With 2+ workers none is at its 1-core cap: the
-  generator (1.0-1.3 cores) and nginx share the same 4 cores, so the box runs out before the workers do.
+- **Throughput scales with workers**: 1.43x with 2, 1.63x with 3. Not linear because the generator (~1-1.3 cores) and
+  nginx share the same 4 cores as the workers; the third worker mostly takes what's left of the machine.
 - **Routing must follow the state.** Each worker deduplicates in its own memory. Hashing on the load's lane key sends
-  every copy of a load to one worker, and dedup behaves as with one worker (38-40% new). Round robin scatters the
-  copies: dedup sees 63% "new", and dispatchers get 42% duplicate alerts.
-- Hash routing still shows more sampled duplicates than one worker (8-10% vs 2.5%) while dedup's "new" share and
-  alerts per posting barely move. Not explained yet; the sink's sample is the next thing to check.
-- **Bug found on the way:** `server feed-ingest:7200` (one name resolving to every replica) made nginx's `hash`
-  rotate through the addresses: 300 requests with one key went 100/100/100, and hash and round robin both gave 44%
-  duplicates. One `server` line per replica fixed it (probe: 0/0/300).
+  every copy of a load to one worker: duplicates stay at the single-worker level (2-3%, dedup's own misses, mostly
+  reposts more than 6 h after the first post). Round robin scatters the copies: 43% duplicate alerts, 1.6x the alerts.
+- **Two nginx bugs found on the way**, both silent (no errors in the client's view at first):
+  1. `server feed-ingest:7200` (one name resolving to every replica) made `hash` rotate through the addresses: 300
+     requests with one key went 100/100/100. One `server` line per replica fixed it (probe: 0/0/300).
+  2. Through nginx, 2 workers still gave **14.5%** duplicates vs **2.3%** with the generator hashing to the workers
+     itself. Cause: Node closes idle keep-alive sockets after 5 s, nginx reuses them for 60 s; each reset counted as a
+     worker failure, and by default (`max_fails=1 fail_timeout=10s`) nginx then took that worker out for 10 s and
+     re-hashed its loads to another worker, whose dedup memory had never seen them. Fixed with `max_fails=0` (a
+     stateful worker must not be skipped for one error) and a 65 s keep-alive on the workers: errors 0, duplicates 2%.
 - In production a partner won't send our routing key; a stateless edge tier (or Kafka's partition key) computes it.
 
 ## Live review, 2026-11-04 to 11-06 (30 h at 1×, 300 dispatchers)
