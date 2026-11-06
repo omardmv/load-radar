@@ -11,8 +11,9 @@ for step in "$@"; do
   w=${step%%:*}; lb=${step##*:}; port=$([ "$lb" = rr ] && echo 8090 || echo 8091)
   dc docker compose --profile feed stop feed-gen
   dc docker compose --profile feed up -d --force-recreate --scale feed-ingest=$w feed-ingest feed-sink
-  dc docker compose --profile feed up -d --force-recreate feed-lb
+  dc docker compose --profile feed up -d --force-recreate --no-deps feed-lb   # --no-deps: else compose resets feed-ingest to 1 replica
   sleep 5
+  echo "  ingest replicas: $(ssh dev "cd ~/load-radar && docker compose --profile feed ps -q feed-ingest | wc -l" 2>/dev/null)"
   dc FEED_TARGET=http://feed-lb:$port docker compose --profile feed up -d --force-recreate --no-deps feed-gen
   start=$(date +%s); echo "STEP workers=$w lb=$lb started $(date -r $start +%H:%M:%S)"
   sleep 300

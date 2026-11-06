@@ -49,7 +49,7 @@ if (isMainThread) {
   const agent = new Agent({ keepAlive: true, maxSockets: o.concurrency });
   const send = (p: Released) => new Promise<void>((resolve) => {
     const t = p.truth;
-    const body = JSON.stringify({ board: p.board, raw: p.raw, load_id: t.load_id, sent_at: Date.now() });
+    const body = JSON.stringify({ board: p.board, raw: p.raw, load_id: `${o.seed}-${t.load_id}`, sent_at: Date.now() });   // each thread's world numbers loads from 1
     const t0 = performance.now();
     const req = request({ host: url.hostname, port: url.port, path: '/loads', method: 'POST', agent,
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-route-key': `${t.origin.state}|${t.dest.state}|${t.pickup_date}|${t.equipment}` } }, (res) => {
