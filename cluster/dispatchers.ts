@@ -12,6 +12,7 @@ const { values: a } = parseArgs({ options: { api: { type: 'string', default: 'ht
   count: { type: 'string', default: '1000' }, seed: { type: 'string', default: '7' }, 'metrics-port': { type: 'string', default: '9464' },
   'check-every': { type: 'string', default: '30' }, 'save-every': { type: 'string', default: '600' } } });
 const reg = new client.Registry();
+client.collectDefaultMetrics({ register: reg });
 const reqs = new client.Counter({ name: 'dispatcher_api_requests_total', help: 'API requests made by dispatchers', labelNames: ['route', 'status'], registers: [reg] });
 const sec = new client.Histogram({ name: 'dispatcher_api_seconds', help: 'API round trip', labelNames: ['route'], registers: [reg], buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5] });
 createServer(async (_req, res) => { res.writeHead(200, { 'content-type': reg.contentType }); res.end(await reg.metrics()); }).listen(Number(a['metrics-port']), '0.0.0.0');

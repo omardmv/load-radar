@@ -8,6 +8,7 @@ D=${CLUSTER_DISPATCHERS:-6000}
 dc() { ssh dev "cd ~/load-radar && $*" >/dev/null 2>&1; }
 q() { ssh dev "curl -s --get localhost:9090/api/v1/query --data-urlencode 'query=$1'" 2>/dev/null | python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(round(float(r[0]["value"][1]),4) if r else "n/a")'; }
 dc docker compose stop live
+dc docker compose --profile cluster up -d cadvisor
 for step in "$@"; do
   w=${step%%:*}; routing=${step##*:}
   dc docker compose --profile cluster stop dispatchers engine-lb engine cluster-world
@@ -34,11 +35,14 @@ for step in "$@"; do
   echo "  CPU per engine (max)  $(q 'max(rate(process_cpu_seconds_total{job="cluster-engine"}[5m]))')"
   echo "  engine loop p99 (max) $(q 'max(max_over_time(nodejs_eventloop_lag_p99_seconds{job="cluster-engine"}[5m]))')"
   echo "  world loop p99        $(q 'max_over_time(world_eventloop_lag_p99_seconds[5m])')"
+  cpu() { q "sum(rate(container_cpu_usage_seconds_total{job=\"cadvisor\",name=~\"$1\"}[5m]))"; }
+  echo "  CPU cores: engines $(cpu 'load-radar-engine-[0-9]+') | world $(cpu 'load-radar-cluster-world-1') | nginx $(cpu 'load-radar-engine-lb-1') | dispatchers $(cpu 'load-radar-dispatchers-1')"
+  echo "  CPU cores: cluster total $(cpu 'load-radar-(engine-[0-9]+|cluster-world-1|engine-lb-1|dispatchers-1)') | all containers $(cpu '.+') | whole machine $(q 'sum(rate(container_cpu_usage_seconds_total{job="cadvisor",id="/"}[5m]))')"
   echo "  API requests/s        $(q 'sum(rate(dispatcher_api_requests_total[5m]))')"
   echo "  API 404 share         $(q '(sum(rate(dispatcher_api_requests_total{status="404"}[5m])) or vector(0)) / sum(rate(dispatcher_api_requests_total[5m]))')"
   echo "  API p99 s             $(q 'histogram_quantile(0.99, sum by (le) (rate(dispatcher_api_seconds_bucket[5m])))')"
 done
-dc docker compose --profile cluster stop dispatchers engine-lb engine cluster-world
+dc docker compose --profile cluster stop dispatchers engine-lb engine cluster-world cadvisor
 ssh dev "cd ~/load-radar && git checkout cluster/upstreams.conf" 2>/dev/null
 dc docker compose up -d live
 echo "cluster stopped, live restarted $(date +%H:%M:%S)"

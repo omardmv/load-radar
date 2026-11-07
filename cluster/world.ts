@@ -47,6 +47,7 @@ createServer((req, res) => {
 
 // Answer-key counters for the SLOs (same names as live mode), plus the boards' view of bans and rejections.
 const reg = new client.Registry();
+client.collectDefaultMetrics({ register: reg });
 const settled = new client.Counter({ name: 'answer_key_settled_total', registers: [reg], labelNames: ['outcome'], help: 'expected alerts that settled: delivered, missed_open, missed_quick' });
 const other = new client.Counter({ name: 'answer_key_other_total', registers: [reg], labelNames: ['kind'], help: 'deliveries outside the answer key: late, duplicate, unexpected, backfill' });
 new client.Gauge({ name: 'world_eventloop_lag_p99_seconds', registers: [reg], help: 'event-loop delay p99 of the world', collect() { this.set(loop.percentile(99) / 1e9); loop.reset(); } });

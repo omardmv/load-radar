@@ -42,6 +42,13 @@ services:
     profiles: [cluster]
     entrypoint: ["node", "cluster/engine.ts", "--boards", "http://cluster-world:7001", "--alerts", "http://cluster-world:7002"]
     cpus: 1                                  # one core per engine worker, enforced
+  cadvisor:                                 # CPU and memory per container (and the whole machine) for the cluster runs
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: [cluster]
+    command: ["--docker_only=true", "--housekeeping_interval=5s", "--store_container_labels=false"]
+    privileged: true
+    devices: ["/dev/kmsg"]
+    volumes: ["/:/rootfs:ro", "/var/run:/var/run:ro", "/sys:/sys:ro", "/var/lib/docker/:/var/lib/docker:ro", "/dev/disk/:/dev/disk:ro"]
   engine-lb:
     image: nginx:1.29-alpine
     profiles: [cluster]
