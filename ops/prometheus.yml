@@ -28,6 +28,3 @@ scrape_configs:
   - job_name: cluster-dispatchers
     static_configs:
       - targets: ["dispatchers:9464"]
-  - job_name: cadvisor                  # per-container CPU during cluster runs
-    static_configs:
-      - targets: ["cadvisor:8080"]
