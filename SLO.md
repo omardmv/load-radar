@@ -58,38 +58,29 @@ The knee is between 2,000 and 5,000 dispatchers. Bottleneck: the engine thread's
 late from 1,000 dispatchers on — more logins load it, not more freight. One engine thread holds the SLOs to roughly
 2,000–3,000 board requests/s.
 
-### Engine workers: 1 vs 2
+### Engine cluster
 
-`--engine-workers N` splits the engine into N threads, each owning 1/N of the dispatchers (logins, alerts, chats),
-sharing nothing. Same world for both runs: 8,000 dispatchers, 100K loads/day, 1×, 5 min measured.
+Engine containers behind nginx; each starts empty and owns whichever dispatchers' requests reach it, polling the
+boards for just those. nginx picks the engine per request by a consistent hash on the dispatcher id. 6,000
+dispatchers, 100K loads/day, 1×, 2 min warm-up, 5 min measured; round robin is the rejected alternative.
 
-| | 1 worker | 2 workers | 2 workers, 12,000 dispatchers |
-| --- | --- | --- | --- |
-| Board requests/s | 3,745 | **6,617** (1.77×) | 6,098 |
-| Process CPU (cores) | 1.9 | 3.5 | 3.4 |
-| Alerts within 60 s | 34.6% | 84.5% | 32.3% |
-| Post → alert p50 / p95 | 86 / 267 s | 39 / 102 s | 91 / 272 s |
-| 429s / bans | 0 / 0 | 0 / 0 | 0 / 0 |
+| | 1 engine | 2 engines | 3 engines | 3 engines, round robin (rejected) |
+| --- | --- | --- | --- | --- |
+| Board requests/s | 2,989 | **5,590** | **6,052** | 5,618 |
+| CPU per engine | 1.00 | 0.99 | 0.77 | 0.96 |
+| Alerts within 60 s | 85% | 100% | 100% | 86% |
+| Post → alert p50 / p95 | 43 / 100 s | 4.9 / 16 s | 2.9 / 7.5 s | 18 / 220 s |
+| Duplicate alerts | 0 | 0 | 0 | 48% |
+| Misrouted calls (404, wrong engine) | 0 | 0 | 0 | 54% |
+| 429s / bans | 0 / 0 | 0 / 0 | 0 / 0 | 0.34% / 0 |
 
-A second worker gives 1.77× the requests on the same load (CPU above one core is the proof both threads ran in
-parallel). The 4-core machine's ceiling is ~6,100–6,600 board requests/s: 12,000 dispatchers didn't get more through.
+Maximum with 3 engines: 9,000 dispatchers → 6,728 board requests/s, 100% within 60 s; 12,000 → 6,481/s, 87%
+within 60 s (past the limit).
 
-### Push feed: 1 / 2 / 3 workers, hash routing
-
-Partners push each posting as one HTTP POST to nginx, which hashes on the load's lane key (origin state |
-destination state | pickup date | equipment) to N ingest workers capped at one core each. 2,000 dispatchers'
-searches per worker, 4 min measured.
-
-| | 1 worker | 2 workers | 3 workers |
-| --- | --- | --- | --- |
-| Postings/s handled | 2,050 | **2,935** (1.43×) | **3,346** (1.63×) |
-| Duplicate alerts | 2.7% | 2.2% | 1.7% |
-| Alert p50 / p99 | 0.40 / 1.5 s | 0.30 / 1.0 s | 0.24 / 1.0 s |
-| Push errors | 0 | 0 | 0 |
-
-Hashing on the lane key sends every copy of a load to one worker, so duplicates stay at the single-worker level.
-Round robin (rejected): 43% duplicate alerts — copies of a load scatter across workers, each with its own dedup
-memory. nginx rules: one `server` line per worker, `max_fails=0`, 65 s keep-alive on the workers.
+Hashing on the dispatcher id keeps everything about a dispatcher on one engine, so duplicates and misrouted calls
+stay at 0. Round robin sends a dispatcher's calls to engines that don't own it: 48% duplicate alerts, 54%
+misrouted. nginx rules: one `server` line per engine, `max_fails=0` (one failed request must not move a
+dispatcher to another engine), 65 s keep-alive on engines.
 
 ### Overload at 30×, with the overload rules
 

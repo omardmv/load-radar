@@ -12,13 +12,13 @@
 | `boards-sim` | replays `out/postings.ndjson` with budgets, 429s, bans, covered loads | — |
 | alert channel sim (`sims/telegram-sim.ts`) | enforces delivery limits per sender and per dispatcher, logs deliveries | — |
 | `scorer` | offline, compares deliveries with the answer key | files |
-| `live` | one process, 2 + N threads: **world thread** (`live/world-worker.ts`: boards-sim + alert channel sim on 127.0.0.1:7001/7002, the rolling answer key); **engine workers** (`live/engine-worker.ts`, `--engine-workers N`, each owns 1/N of the dispatchers, metrics on :9464+i); **main thread** (`live/server.ts`: the UI's HTTP+SSE API, search parser, agent; also the engine when N=0) | threads exchange messages; the engine reaches the simulators over HTTP; outside the container: GLiNER2, Ollama, the collector, the browser; searches persist in `live_state` |
-| `feed-gen` (`feed/push-gen.ts`) | plays the partners: the same simulated world, one POST per posting, `X-Route-Key` = lane key | `feed-lb` |
-| `feed-lb` (`feed/nginx.conf`) | nginx; hashes `X-Route-Key` to one `feed-ingest` replica per load (round robin kept only to measure against) | `feed-ingest` replicas |
-| `feed-ingest` (`feed/ingest.ts`) | one process per replica, one core each: normalize, dedup, match every search, its own dedup/alerted memory | `feed-lb`, `feed-sink` |
-| `feed-sink` (`feed/sink.ts`) | stands in for the web app; scores latency and duplicate alerts | `feed-ingest` replicas |
+| `live` | one process, two threads: **world thread** (`live/world-worker.ts`: boards-sim + alert channel sim on 127.0.0.1:7001/7002, the rolling answer key); **main thread** (`live/server.ts`: one engine on its main thread — api, planner, scheduler, pollers, normalizer, dedup, matcher, alert queue, notifier — plus the UI's HTTP+SSE API, search parser, agent) | threads exchange messages; the engine reaches the simulators over HTTP; outside the container: GLiNER2, Ollama, the collector, the browser; searches persist in `live_state` |
+| `cluster-world` (`cluster/world.ts`) | the engine cluster's outside world: boards-sim and the alert channel sim (:7001/:7002), dispatcher registration for the answer key (:7003), answer-key metrics (:9464) | engine replicas reach it over HTTP; `dispatchers` registers through it |
+| `engine` replicas (`cluster/engine.ts`), `--scale engine=N`, one core each | starts owning nothing; owns whichever dispatchers `engine-lb` routes to it and polls the boards only for those. API: `PUT /api/dispatchers/:id`, `GET /api/dispatchers/:id/alerts` | `cluster-world` over HTTP; sits behind `engine-lb` |
+| `engine-lb` (`cluster/nginx.conf` + `upstreams.conf`) | nginx; consistent hash on the dispatcher id so one dispatcher always reaches the same engine | `engine` replicas |
+| `dispatchers` (`cluster/dispatchers.ts`) | plays N dispatchers (default 6000): registers them with the answer key, saves searches through `engine-lb`, checks alerts every ~30 s, re-saves every ~10 min | `cluster-world` (registration), `engine-lb` (API) |
 
-Infrastructure in `docker compose` ([DEPLOY.md](DEPLOY.md)): OTel Collector, Tempo, Loki, Prometheus, Grafana, GLiNER2, Ollama, self-hosted Langfuse, and `live` — all running continuously. `app` and the `feed` profile run on demand.
+Infrastructure in `docker compose` ([DEPLOY.md](DEPLOY.md)): OTel Collector, Tempo, Loki, Prometheus, Grafana, GLiNER2, Ollama, self-hosted Langfuse, and `live` — all running continuously. `app` and `cluster` profiles run on demand.
 
 ## 2. Data model (TypeScript types)
 
@@ -156,7 +156,7 @@ loop:
 
 `stretch` is 1 normally and grows when the poll queue's oldest item waits more than 1 s. Reacting to board responses: `200` resets `consecutive429` to 0; `429` increments it and sets `pausedUntil = now + min(15 min, max(Retry-After, 2^n × 5 s))` with jitter; three `429`s in 10 minutes opens the circuit (pause 15 min, halve the budget for an hour); `403 account_suspended` bans the credential, stops every entry for it and notifies the user (SLO: always 0 bans).
 
-**6.4 Pollers.** A pool of async tasks taking entries from the poll queue, concurrency per board capped by a semaphore sized with Little's law (section 9), matching the HTTP agent's socket count. Timeout 5 s, no retry inside the poller — the scheduler owns retry timing. `since = entry.cursor` so only new postings return; a success moves the cursor to the newest `postedAt`. One request per poll, never a follow-up call per load (section 9). **Push feeds** skip the scheduler and the pollers: partners POST each posting to nginx, which hashes its lane key to one ingest worker (`feed/ingest.ts`); there `visibleTo = all` and every search is matched (DESIGN.md §3.5).
+**6.4 Pollers.** A pool of async tasks taking entries from the poll queue, concurrency per board capped by a semaphore sized with Little's law (section 9), matching the HTTP agent's socket count. Timeout 5 s, no retry inside the poller — the scheduler owns retry timing. `since = entry.cursor` so only new postings return; a success moves the cursor to the newest `postedAt`. One request per poll, never a follow-up call per load (section 9).
 
 **6.5 Normalizer.** One adapter per board turns its JSON into the one `Load` schema (per-field differences: DESIGN.md §3.3). Equipment maps into `van`/`reefer`/`flatbed` (`VR`/Van-Reefer → `van`, with `equipmentDetail` kept so reefer searches can opt in); unknown values are dropped and counted. Place lookup (gazetteer, in memory): exact match on normalized city+state, then known aliases, then — because Truckstop's names are cut at 14 characters — a prefix match within the state, then Jaro-Winkler fuzzy match (≥ 0.92); anything else is dropped and counted. Then `cell = geohash(lat, lon, 4)` (matcher uses the first 3 characters), `contentHash = sha1(board, id, rate, pickupDate, origin, dest, equipment)`, and `visibleTo` comes from the `RawPosting`.
 
@@ -195,13 +195,15 @@ A hot load matching 5,000 users costs 5,000 in-memory set checks, about a millis
 
 **6.9 Notifier.** Dispatchers are spread over senders by `hash(dispatcher) % senders`. Each send takes a token from the sender bucket (30/s) and the dispatcher bucket (1/s); if the dispatcher bucket is empty, the alert is held 2 s and merged into one digest (up to 5 loads). On `429`, wait `retry_after` and retry the send — delivery is at least once, and the `(user, load)` set makes a repeat harmless. HTTP concurrency to the alert channel: ~10 sockets per sender. The `deliver` span records `postedAt → accepted by the alert channel`: the headline latency.
 
-**6.10 Live mode** (`live/`) runs the pipeline above continuously, plus a UI: one process, 2 + N threads (full diagram: DESIGN.md §3.0).
+**6.10 Live mode** (`live/`) runs the pipeline above continuously, plus a UI: one process, two threads, with the engine running on the main thread (full diagram: DESIGN.md §3.0).
 
 **`live/world-worker.ts`** is the outside world on its own thread: the stream, boards-sim and the alert channel sim on 127.0.0.1:7001/7002 (the engine talks to them exactly as to real boards), and the rolling answer key, which sees both loads being born and alerts being delivered. **`live/stream.ts`** is a world that never stops: it samples a Poisson count of new loads per tick (rate = `loadsPerDay × HOURLY[centralHour(now)] / HOURLY_SUM`), schedules every posting each will ever get on a min-heap keyed by `posted_at`, and releases due ones into the same `BoardData` shape `boards-sim` serves from; it prunes postings older than 6 simulated hours, and `burst()` backs the UI's burst button. **`live/score.ts`** is the live answer key, built incrementally: `onLoad` records an `Expect` per user whose searches should hear about a new load; `onDelivery` checks each delivery against it (`late` if it arrives after the cutoff, `backfill` if the search predates the load, else `unexpected`, `duplicate` on a repeat); `sweep()` (every 5 s) declares anything pending past 15 simulated minutes `missed`; `rebuild()` re-indexes on search changes.
 
 `live/server.ts`'s API (under `/api/`, alongside the built `ui/` served as static files): `GET /metrics` (the SLO answer-key counters, separate from the engine's own `/metrics` on :9464); `GET /api/state` / `/api/events` (one-shot snapshot; SSE — `stats`/s, `postings`/250ms, `alert` per delivery); `POST /api/parse` / `/api/searches` (run the parser; or parse + validate + save + persist + `engine.refreshSearches()`); `DELETE /api/searches/:id`; `POST /api/speed` (1–120×) / `/api/rate` (1K–500K loads/day) / `/api/burst` (≤5,000 loads); `POST /api/agent` ("Should I take it?": builds your truck from your nearest matching search, runs the load-decision agent, returns its verdict next to the written policy's). Every path but `/api/events`/`/api/state` runs in one OpenTelemetry trace, with `/api/searches/Y12` normalized to `/api/searches/:id` in the span name.
 
 `engine.refreshSearches()` (called after any search change) rebuilds the matcher and polling plans, then cancels any queued or held alert whose searches are *all* gone. The **adjustable clock** (`createAdjustableClock`) re-anchors sim time to real time on every speed change, so the UI's slider doesn't make `now()` jump. The **logger** (`src/obs/log.ts`) is one `log(level, event, attrs)` function: one JSON line to stdout, plus the same record to the collector when OTLP is configured, carrying the active span's trace id.
+
+**6.11 Engine cluster** (`cluster/`) scales the engine out behind nginx, run on demand ([DEPLOY.md](DEPLOY.md)). Each `engine` replica starts owning no dispatchers; `engine-lb` hashes the dispatcher id taken from the URL, so a dispatcher's calls always land on the same replica, which is the one that then owns and polls for it — one `server` line per replica (`cluster/upstreams.conf`), `max_fails=0` (so one failed request never moves a dispatcher elsewhere), 65 s keep-alive. A `PUT /api/dispatchers/:id` call saves that dispatcher's logins and searches; changes are applied every 5 s — one rebuild of the match index, and new polling plans only for the dispatchers that changed (`engine.refreshUsers()`), so a save that changes nothing does no work.
 
 ## 7. Snapshots and recovery
 
@@ -233,7 +235,7 @@ This section lists what the code emits; [OBSERVABILITY.md](OBSERVABILITY.md) is 
 
 ## 11. Capacity: what breaks first on one machine
 
-Measured results: DESIGN.md §5, SLO.md. Likely order of failure: **board budgets** (outside our control, the customer-facing limit) → **HTTP pool** if undersized (silent staleness, section 9) → **one CPU core**/event-loop lag from parsing board responses (fix: `--engine-workers`, partitioned by `credentialId`) → **alert delivery** on hot loads (digests, more senders, a second channel) → **heap and GC** as in-memory state grows (compact entries, partition) → the **machine's sockets, memory or CPU** in total (section 12).
+Measured results: DESIGN.md §5, SLO.md. Likely order of failure: **board budgets** (outside our control, the customer-facing limit) → **HTTP pool** if undersized (silent staleness, section 9) → **one CPU core**/event-loop lag from parsing board responses (fix: the engine cluster, section 6.11, partitioned by dispatcher id) → **alert delivery** on hot loads (digests, more senders, a second channel) → **heap and GC** as in-memory state grows (compact entries, partition) → the **machine's sockets, memory or CPU** in total (section 12).
 
 ## 12. When to add a shared store or log (triggers)
 
@@ -241,7 +243,7 @@ Add something only when a measurement shows the need:
 
 | Trigger (measured) | Add | Not Redis because / when Redis fits |
 | --- | --- | --- |
-| One machine's CPU, memory or sockets run out after worker threads | **More machines**, each owning partitions (scheduler/pollers by `credentialId`, dedup by block key, matcher by `cell3`, alerts by `userId`), connected by a **log** (Kafka/Redpanda) | A log keeps "one owner per key" and replays state after a crash; a central Redis brings back a network call per message and hot keys |
+| One machine's CPU, memory or sockets run out after the engine cluster already fills it | **More machines**, each owning partitions (scheduler/pollers by `credentialId`, dedup by block key, matcher by `cell3`, alerts by `userId`), connected by a **log** (Kafka/Redpanda) | A log keeps "one owner per key" and replays state after a crash; a central Redis brings back a network call per message and hot keys |
 | Crash loss from section 7 is too high | Durable log between stages; snapshots plus log replay | Same as above |
 | Something can't be partitioned (a limit shared by processes that don't own the key), or many API servers need shared sessions/caching | A small shared store for just that thing — **Redis fits here** (a token bucket in one Lua script; a cache for the API) | Kept off the per-posting path; the hot path still doesn't touch it |
 
@@ -265,8 +267,7 @@ No automated unit or integration tests. Correctness is checked by measuring the 
 | What | How |
 | --- | --- |
 | End to end: misses, duplicates, latency, bans | `node scripts/run.ts` + the batch scorer, or `live/score.ts` plus SLO.md's dashboards for the always-on system |
-| Engine scaling (1 vs N engine workers) | `scripts/core-steps.sh`, read against Prometheus |
-| Push-feed scaling (N ingest workers, hash vs round robin) | `scripts/feed-steps.sh`, read against Prometheus |
+| Engine cluster scaling (1–N engines, hash vs round robin) | `scripts/cluster-steps.sh`, read against Prometheus |
 | Realism of the generated data | `node sim/validate.ts` against real reference numbers |
 | Dedup classifier quality | held-out precision/recall in `ml/dedup/RESULTS.md` |
 | Search parser quality | the labeled eval set and `ml/parser/RESULTS.md` |
@@ -279,7 +280,7 @@ No automated unit or integration tests. Correctness is checked by measuring the 
 ```
 load-radar/
   README.md  DESIGN.md  LLD.md  OBSERVABILITY.md  DEPLOY.md  SCALING.md (after load tests, not written)
-  docker-compose.yml   live mode, models, observability, Langfuse; app and feed profiles run on demand
+  docker-compose.yml   live mode, models, observability, Langfuse; app and cluster profiles run on demand
   ops/            server/deploy.sh, macos/*.plist (SSH tunnel), otel-collector.yaml, tempo.yaml, prometheus.yml, grafana/
   sim/            world.ts (calibrated model), gen.ts (batch wrapper), validate.ts, data/, ASSUMPTIONS.md
   sims/           boards-sim.ts, telegram-sim.ts (alert channel), cover.ts
@@ -287,11 +288,11 @@ load-radar/
                   dedup/ (two-stage dedup, 18 pair features, classifier); match/ (matcher, filters); plan/ (heat, planner);
                   schedule/ (scheduler); poll/ (poller); alerts/ (alert-queue, notifier); parse/ (rules, GLiNER2/Qwen, normalizer);
                   obs/ (metrics + sampled traces, GenAI spans, structured logs); engine.ts (wires it all together)
-  live/           server.ts (API + UI host), world-worker.ts, engine-worker.ts, stream.ts, score.ts, Dockerfile
-  feed/           push-gen.ts (feed-gen), nginx.conf + upstreams.conf (feed-lb), ingest.ts (feed-ingest), sink.ts (feed-sink)
+  live/           server.ts (API + UI host), world-worker.ts, stream.ts, score.ts, Dockerfile
+  cluster/        world.ts (cluster-world), engine.ts (engine replicas), nginx.conf + upstreams.conf (engine-lb), dispatchers.ts
   ui/             the React + shadcn/ui frontend (Vite build, served by live/server.ts)
   scorer/         score.ts (batch)
-  scripts/        run.ts (batch run), core-steps.sh (engine-worker scale test), feed-steps.sh (push-feed scale test)
+  scripts/        run.ts (batch run), cluster-steps.sh (engine cluster scale test)
   bench/overhead/ the observability-cost benchmark, RESULTS.md
   ml/parser/      GLiNER2 service, eval harness, RESULTS.md
 ```

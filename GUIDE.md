@@ -9,7 +9,7 @@ on the one before, and each ends with **Go deeper** links to the detailed docume
 | [2. What Load Radar does](#2-what-load-radar-does) | The product, and the measured results |
 | [3. How one load becomes an alert](#3-how-one-load-becomes-an-alert) | The pipeline, step by step |
 | [4. How we test without real load boards](#4-how-we-test-without-real-load-boards) | The simulated world and answer key |
-| [5. Architecture](#5-architecture) | Processes, threads, the push feed, where state lives |
+| [5. Architecture](#5-architecture) | Live mode, the engine cluster, where state lives |
 | [6. Technology and why](#6-technology-and-why) | The stack, briefly |
 | [7. Machine learning](#7-machine-learning) | The three models and their results |
 | [8. Reliability: SLOs and overload](#8-reliability-slos-and-overload) | What "working" means, and what happens under stress |
@@ -69,7 +69,7 @@ world (Part 4). It has never been connected to real boards.
 | Alert speed | 100% of alerts within 60 s; typical 2.7 s, p99 9.3 s (30 h live, ~290,000 alerts) |
 | Account safety | 0 bans, 0 rate-limit responses in 33 million board requests |
 | Duplicates | 0.03% of alerts |
-| Capacity | ~2,000 dispatchers per engine thread within target; 2 engine workers give 1.77× the throughput |
+| Capacity | 1 engine ~3,000 dispatchers within target; the engine cluster reaches 9,000 on 3 engines |
 | Dedup classifier | 99.85% precision, 99.4% recall |
 | Search parser | 98% of test searches fully right |
 | Load-decision agent | 88–100% right splitting the job, vs 21–42% letting a model decide everything |
@@ -126,37 +126,35 @@ with a UI: `live/`).
 
 ## 5. Architecture
 
-Everything in Part 3 runs in one Node.js process, split into threads:
+**Live** (the default) runs everything in Part 3 in one Node.js process, on one engine:
 
 ```
  WORLD THREAD    endless loads & postings, boards-sim, alert channel, the answer key — its own CPU core
        ▲ HTTP, exactly as to real boards
- ENGINE WORKERS ×N   each owns 1/N of the dispatchers: scheduler → pollers → normalize → dedup → match → alerts
- MAIN THREAD     HTTP API + SSE for the UI; runs the engine itself when N = 0 (the default)
+ MAIN THREAD     the engine (scheduler → pollers → normalize → dedup → match → alerts) + HTTP API + SSE for the UI
 ```
 
-`LIVE_ENGINE_WORKERS=N` splits the engine into N worker threads, each owning a fixed share of dispatchers (login
-*i* → worker *i mod N*). The world always has its own thread, so the engine never shares a core with the boards
-it polls.
-
-Partner boards **push** postings instead of being polled — one POST per posting, received once for everyone, run
-on demand behind nginx (`scripts/feed-steps.sh`):
+**The engine cluster** (run on demand, `scripts/cluster-steps.sh`) scales the engine out to several containers:
 
 ```
- feed-gen (plays the partners) ─▶ nginx (hashes on origin|destination|date|equipment, 1 server line per worker)
-   ─▶ feed-ingest workers ×N (1 core each) ─▶ feed-sink (scores it)
+                 ┌─ engine 1 ─┐
+ dispatchers ─▶ nginx ─ engine 2 ─▶ boards (world)
+                 └─ engine 3 ─┘
 ```
 
-Hashing on the load's key — not round robin — keeps every copy of a load on one worker. Round robin let copies
-land on different workers: measured 43% duplicate alerts, against 1.7–2.7% with hash routing.
+Each engine container starts empty and **owns** whichever dispatchers' requests reach it: it polls the boards for
+just those dispatchers (their logins, rate limits, "already alerted" memory, alerts). nginx picks the engine for
+each request with a **consistent hash on the dispatcher id**, so one dispatcher's calls always land on the same
+engine. Round robin instead (rejected) would send a dispatcher's calls to engines that don't own it: measured 48%
+duplicate alerts and 54% misrouted calls, against 0% for both with hash routing.
 
 **State** lives in memory inside the engine, no database on the hot path, so a restart loses it; saved searches
 persist as JSON on a volume. Every piece of state already has a **partition key** (login, map cell or user), so
-splitting it across workers later is routing, not a redesign.
+splitting it across engines is routing, not a redesign.
 
 **Runs on** one Linux laptop (4 cores, 14 GB RAM) via Docker Compose: `live` (engine + world + API + UI),
-`gliner2`, `ollama`, the push feed (on demand), and observability (OTel Collector, Prometheus, Tempo, Loki,
-Grafana, Langfuse).
+`gliner2`, `ollama`, the engine cluster (on demand, live stopped meanwhile), and observability (OTel Collector,
+Prometheus, Tempo, Loki, Grafana, Langfuse).
 
 **Go deeper:** [DESIGN.md §3.0](DESIGN.md) (full live diagram), [LLD.md §1–4](LLD.md) (processes, data types,
 state, stages and queues), [LLD.md §16](LLD.md) (full repo layout).
@@ -239,10 +237,8 @@ handles ~2,000–3,000 board requests/s within target.
 
 | Step | Status | Rough capacity |
 | --- | --- | --- |
-| **Engine workers** (N threads, one machine) | Built, measured | 1.77× with 2 workers on 4 cores |
-| **Push feed** (partner feeds behind nginx, hash-routed) | Built, measured | 2,050 → 3,346 postings/s, 1 → 3 workers |
-| Bigger core; many machines (leases move a dead worker's logins) | Not built, estimate | ~3,000–5,000/core; ~200 machines for 500K req/s |
-| Partition the data (Kafka/Redpanda by geohash) | Not built, estimate | Removes cross-shard lookups |
+| **Engine cluster** (engines behind nginx, one machine) | Built, measured | 3 engines: ~6,700 board requests/s, 9,000 dispatchers within the SLO |
+| Engines on several machines; handover and crash recovery | Not built | — |
 
 No step puts a database on the hot path. [LLD.md §12](LLD.md) lists the measured triggers for adding a shared
 store.

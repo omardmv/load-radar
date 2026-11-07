@@ -8,7 +8,7 @@ One Linux server ("dev": Ubuntu 24.04, Ryzen 7 3700U 4C/8T, 14 GB RAM, no GPU) r
 Mac                                        Server (Docker Compose, ~/load-radar)
  browser ──► localhost:{8080,3000,3001,     SSH tunnel      127.0.0.1:<same port> ─► live (UI), grafana, langfuse-web,
               9090,9095,4318,7100,11435} ──────────────►                            prometheus, minio, gliner2, ollama
- code    ──► git push ─► GitHub ─► git pull ► ~/load-radar ─► app, feed (on demand, see below)
+ code    ──► git push ─► GitHub ─► git pull ► ~/load-radar ─► app, cluster (on demand, see below)
                                                           ├─► gliner2 :7100   (GLiNER2, CPU)
                                                           ├─► ollama  :11434  (Qwen 2.5, CPU: parser eval, load-decision agent)
                                                           └─► otel-collector :4318 ─► tempo (traces) / loki (logs) / langfuse / prometheus
@@ -16,7 +16,7 @@ Mac                                        Server (Docker Compose, ~/load-radar)
 
 Every port is published on the server's `127.0.0.1` only, so nothing is open on the LAN; every UI is reached through the SSH tunnel below.
 
-`live`, the models, and observability run continuously (`restart: unless-stopped`). Two Docker Compose profiles don't: `app` runs the batch engine, simulators and eval on demand (`docker compose run --rm app ...`); `feed` runs the push-feed test — `feed-gen`, `feed-lb`, `feed-ingest`, `feed-sink` — started with `docker compose --profile feed up -d --scale feed-ingest=N` (`scripts/feed-steps.sh` drives this for a scale test and tears it down afterward).
+`live`, the models, and observability run continuously (`restart: unless-stopped`). Two Docker Compose profiles don't: `app` runs the batch engine, simulators and eval on demand (`docker compose run --rm app ...`); `cluster` runs the engine cluster — `cluster-world`, `engine` (scaled), `engine-lb`, `dispatchers` — started with `docker compose --profile cluster up -d --scale engine=N`. `scripts/cluster-steps.sh` drives the scale test: it stops `live`, steps through engine counts and routing modes, then restarts `live` when done.
 
 ## Ship a change (continuous deploy)
 
@@ -47,4 +47,4 @@ ssh dev '(crontab -l; echo "* * * * * ~/load-radar/ops/server/deploy.sh >> ~/loa
 
 ## Check it
 
-`ssh dev tail -5 ~/load-radar-deploy.log` shows the last deploy. `docker compose ps` on the server shows what's running. Grafana (`:3000`, through the tunnel) is the server's home dashboard — the SLO row shows whether alerts are fast, complete, and bans stay at zero. All long-running services have `restart: unless-stopped` / `always`, so they come back after a server reboot; the `app` and `feed` containers run only for the duration of a command.
+`ssh dev tail -5 ~/load-radar-deploy.log` shows the last deploy. `docker compose ps` on the server shows what's running. Grafana (`:3000`, through the tunnel) is the server's home dashboard — the SLO row shows whether alerts are fast, complete, and bans stay at zero. All long-running services have `restart: unless-stopped` / `always`, so they come back after a server reboot; the `app` and `cluster` containers run only for the duration of a command.

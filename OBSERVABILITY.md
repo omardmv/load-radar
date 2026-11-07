@@ -42,8 +42,9 @@ against it, which makes clock skew visible instead of silently corrupting latenc
 
 ## 3. Metrics
 
-Prometheus scrapes the engine (one port per engine worker, `:9464 + i`), the push-feed ingest workers (found by
-Docker DNS), and `live/server.ts`.
+Prometheus scrapes `live` and the batch `app` (engine metrics, `:9464`) and `live/server.ts`'s own API (`:8080`),
+plus the engine cluster when it's running: `cluster-engine` and `cluster-engine-api` (every `engine` replica,
+`:9464`/`:8080`, found by Docker DNS), `cluster-world` (`:9464`) and `cluster-dispatchers` (`:9464`).
 
 | Metric | Type | Source |
 | --- | --- | --- |
@@ -56,20 +57,20 @@ Docker DNS), and `live/server.ts`.
 | `normalize_failed_total{board,reason}` | counter | engine |
 | `engine_gauge{name}` | gauge | engine — one gauge, many names: `poll_queue`, `raw_queue`, `alert_queue`, `alert_queue_oldest_wait_ms`, `polls_waiting_for_login`, `polls_coalesced`, `polls_in_flight`, `logins_busy`, `logins_paused`, `logins_banned`, `scheduler_stretch`, `alerts_dropped_stale`, `notifier_held`, `notifier_dropped_stale` |
 | `spans_dropped_total` | counter | engine — exporter queue health |
-| `answer_key_settled_total{outcome}` (delivered/missed_open/missed_quick), `answer_key_other_total{kind}` (late/duplicate/unexpected/backfill), `answer_key_pending` | counter / gauge | `live/server.ts` — SLO 2 ground truth |
-| `world_eventloop_lag_p99_seconds` | gauge | `live/server.ts` — world thread (boards, alert channel, answer key) |
+| `answer_key_settled_total{outcome}` (delivered/missed_open/missed_quick), `answer_key_other_total{kind}` (late/duplicate/unexpected/backfill), `answer_key_pending` | counter / gauge | `live/server.ts` and `cluster-world` — SLO 2 ground truth |
+| `world_eventloop_lag_p99_seconds` | gauge | `live/server.ts` and `cluster-world` — the world thread/container (boards, alert channel, answer key) |
 | `llm_calls_total`, `llm_duration_milliseconds_*` | counter / histogram | no app code — the OTel Collector's `spanmetrics` connector, built from GenAI spans (section 6) |
-| `feed_ingest_requests_total{result}`, `feed_dedup_total{result}`, `feed_alerts_emitted_total`, `feed_ingest_seconds` | counter / histogram | `feed/ingest.ts` (push feed) |
-| `feed_sink_sampled_total{kind}`, `feed_alert_seconds` | counter / histogram | `feed/sink.ts` |
-| `feed_gen_requests_total{status}`, `feed_gen_request_seconds` | counter / histogram | `feed/push-gen.ts` (generator) |
+| `engine_api_requests_total{route,status}`, `engine_dispatchers_owned` | counter / gauge | `cluster/engine.ts` — each replica's dispatcher API |
+| `dispatcher_api_requests_total{route,status}`, `dispatcher_api_seconds{route}` | counter / histogram | `cluster/dispatchers.ts` — the cluster test's own API calls |
+| `boards_banned_logins`, `boards_rejected_total` | gauge | `cluster/world.ts` — bans and 429s the boards simulator has issued |
 | Node defaults (`nodejs_eventloop_lag_*`, `process_cpu_seconds_total`, heap, GC) | — | `prom-client`'s `collectDefaultMetrics`, every process |
 
 **Cardinality rule:** never label by user, credential, search, load or chat — per-credential detail goes in logs
 and traces instead.
 
 **Planned, not built:** per-login pause/ban log lines, a `normalize.unknown_place` log event, a dedicated
-latency-by-part metric, poll-freshness and alerts-per-request efficiency metrics, Grafana panels for the push feed
-and per-engine-worker view.
+latency-by-part metric, poll-freshness and alerts-per-request efficiency metrics, Grafana panels for the engine
+cluster.
 
 ## 4. Traces
 
@@ -145,8 +146,7 @@ default home dashboard, refreshes every 10 s, last 30 minutes by default:
   paused/banned logins, drops), **Models** (LLM calls/s, latency p95), and a **traces + logs** table for recent
   API requests.
 
-**Not built:** panels for the push feed and per-engine-worker metrics; a fuller per-lane, per-resource load-test
-view.
+**Not built:** panels for the engine cluster; a fuller per-lane, per-resource load-test view.
 
 ## 8. Alerts
 

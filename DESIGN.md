@@ -30,7 +30,7 @@ requests/s = dispatchers × board logins each × requests per login per second
    × 1000 growth (5 million dispatchers)                                   ≈ 4.7 million/s
 ```
 
-One engine worker serves ~2,000–3,000 requests/s within the SLOs (SLO.md). 5,000 dispatchers needs 2–3 workers on this 4-core server; 4.7 million/s would need ~2,000 workers. Moving volume to push feeds (§3.5) is what bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
+One engine serves ~3,000 board requests/s within the SLOs; three engines behind nginx serve ~6,700/s on this 4-core machine — enough for 9,000 dispatchers (§3.5, SLO.md). 4.7 million/s would need roughly 1,500 engines that way. Moving volume to partner feeds (§3.5) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
 
 ## 2. Constraints that shape the design
 
@@ -52,25 +52,18 @@ Two views of the same system. **System design** is the logic: what happens to a 
 ```mermaid
 flowchart LR
   subgraph CP["Control plane: a dispatcher saves a search (rare, accuracy matters)"]
-    U[Dispatcher] --> PARSE["Understand the search<br/>rules first, a model only if unsure;<br/>ask instead of guessing"]
+    U[Dispatcher] -->|"hash(dispatcher id) → the engine that owns them"| PARSE["Understand the search<br/>rules first, a model only if unsure;<br/>ask instead of guessing"]
     PARSE --> SEARCHES[(Saved searches)]
     SEARCHES --> PLAN["Plan the polling<br/>merge a dispatcher's overlapping searches;<br/>budget per login, busy lanes more often (√ rule)"]
     SEARCHES --> INDEX["Match index<br/>area × equipment → searches"]
   end
 
-  subgraph POLL["Polling lane: boards that need each customer's own login<br/>split by DISPATCHER: everything about one dispatcher in one place, nothing shared"]
+  subgraph POLL["Polling lane: boards that need each customer's own login<br/>split by DISPATCHER: the engine that owns a dispatcher holds everything about them, nothing shared"]
     SCHED["Decide when to check<br/>stay inside each login's budget;<br/>one request at a time per login; back off on 'slow down'"]
     FETCH["Fetch with the customer's login"]
     N1["Normalize<br/>one format; who may see it"]
     D1["Dedup<br/>same id, then 'same load?' model"]
     M1["Match<br/>only that customer's searches"]
-  end
-
-  subgraph PUSH["Push lane: partners send each load once, for everyone<br/>split by LOAD: every copy of a load to the same place, so dedup sees them all"]
-    ROUTE["Route by lane key<br/>origin, destination, pickup date, equipment"]
-    N2["Normalize"]
-    D2["Dedup"]
-    M2["Match<br/>every customer's searches"]
   end
 
   subgraph OUT["Alerts"]
@@ -80,8 +73,6 @@ flowchart LR
 
   PLAN --> SCHED --> FETCH --> N1 --> D1 --> M1 --> Q
   INDEX --> M1
-  INDEX --> M2
-  PARTNERS[Partners] --> ROUTE --> N2 --> D2 --> M2 --> Q
   Q --> SEND --> PHONE[Dispatcher]
   PHONE -->|"Should I take it?"| DECIDE["Decide<br/>a model reads the broker's comments;<br/>code applies the dispatch policy"]
 ```
@@ -94,24 +85,19 @@ flowchart TB
   GH[(GitHub main)] -->|cron pulls every minute, rebuilds| SERVER
 
   subgraph SERVER["Linux server: 4 cores, Docker Compose"]
-    subgraph LIVE["live container: one Node.js process"]
-      MAIN["Main thread<br/>HTTP API + SSE, search parser, agent"]
-      EW1["Engine worker 1 (thread)<br/>dispatchers 0, 2, 4, …<br/>their logins, alerts; senders 0–1<br/>metrics :9464"]
-      EW2["Engine worker 2 (thread)<br/>dispatchers 1, 3, 5, …<br/>their logins, alerts; senders 2–3<br/>metrics :9465"]
+    subgraph LIVE["live container: one Node.js process — the always-on demo"]
+      MAIN["Main thread<br/>engine + HTTP API + SSE + UI, search parser, agent<br/>metrics :9464"]
       WORLD["World thread<br/>simulated boards :7001, alert channel :7002,<br/>answer key"]
-      MAIN <-->|messages| EW1
-      MAIN <-->|messages| EW2
-      EW1 -->|HTTP polls, alerts| WORLD
-      EW2 -->|HTTP polls, alerts| WORLD
+      MAIN -->|HTTP polls, alerts| WORLD
     end
-    subgraph FEED["Push feed: profile 'feed', started by scripts/feed-steps.sh"]
-      GEN["feed-gen<br/>plays the partners"] -->|"POST /loads + X-Route-Key"| LB["feed-lb (nginx)<br/>:8091 hash on lane key<br/>one server line per worker, max_fails=0"]
-      LB -->|"hash(lane) → 1"| ING1["Ingest worker 1<br/>container, 1 core<br/>own dedup memory"]
-      LB -->|"hash(lane) → 2"| ING2["Ingest worker 2<br/>container, 1 core<br/>own dedup memory"]
-      LB -->|"hash(lane) → 3"| ING3["Ingest worker 3<br/>container, 1 core<br/>own dedup memory"]
-      ING1 -->|alert batches| SINK["feed-sink<br/>scores latency, duplicates"]
-      ING2 -->|alert batches| SINK
-      ING3 -->|alert batches| SINK
+    subgraph CLUSTER["cluster profile: on demand, scripts/cluster-steps.sh (live stopped meanwhile)"]
+      DISP["dispatchers<br/>container, plays N dispatchers"] -->|"PUT/GET /api/dispatchers/:id"| LB["engine-lb (nginx)<br/>hash on dispatcher id<br/>one server line per engine, max_fails=0"]
+      LB -->|"hash → owner"| E1["engine 1<br/>container, 1 core"]
+      LB -->|"hash → owner"| E2["engine 2<br/>container, 1 core"]
+      LB -->|"hash → owner"| E3["engine 3<br/>container, 1 core"]
+      E1 -->|polls, alerts| CWORLD["cluster-world<br/>boards, alert channel, answer key"]
+      E2 -->|polls, alerts| CWORLD
+      E3 -->|polls, alerts| CWORLD
     end
     MODELS["gliner2 :7100 (search parsing)<br/>ollama :11434 (agent)"]
     subgraph OBS["Observability"]
@@ -120,40 +106,41 @@ flowchart TB
       GRAF["Grafana :3000"]
     end
     MAIN --> MODELS
-    EW1 -. metrics .-> PROM
-    EW2 -. metrics .-> PROM
-    ING1 -. "metrics (found by Docker DNS)" .-> PROM
-    ING2 -.-> PROM
-    ING3 -.-> PROM
+    MAIN -. metrics .-> PROM
+    E1 -. "metrics (found by Docker DNS)" .-> PROM
+    E2 -.-> PROM
+    E3 -.-> PROM
     MAIN -. traces, logs .-> OTEL
     PROM --> GRAF
     OTEL --> GRAF
   end
 ```
 
-The number of workers is a setting (`LIVE_ENGINE_WORKERS`, `--scale feed-ingest`); shown here with 2 engine workers and 3 ingest workers. The default live service runs the engine on the main thread and no push feed.
+Live is the always-on demo: one engine on the main thread. The cluster profile scales engines behind nginx — `--scale engine=N` sets how many, shown here with 3.
 
 ### 3.0 Live mode: the same pipeline, running continuously
 
-One container, several threads: the simulated world runs on its own thread/core so the engine never shares a core with the boards it polls; `--engine-workers N` splits the engine itself across N threads.
+One container, two threads: the simulated world runs on its own thread/core so the engine never shares a core with the boards it polls. Scaling to several engines is the cluster, below.
 
 ```
-┌─ live container: one Node process, 2 + N threads ─────────────────────────────────────────────┐
+┌─ live container: one Node process, 2 threads — the always-on demo ─────────────────────────────┐
 │ WORLD THREAD  live/world-worker.ts — new loads forever (Poisson), reposts/cross-posts/co-brokers │
 │   ├─► boards-sim :7001  per-login budgets, 429 + Retry-After, bans                              │
 │   ├─► alert channel :7002  30 msg/s/sender, 1 msg/s/dispatcher (sims/telegram-sim.ts)            │
 │   └─► live/score.ts     answer key built as each load is born; scores every delivery             │
-│ ENGINE WORKER i  live/engine-worker.ts — dispatchers i, i+N, i+2N, …; own logins, rate limits,   │
-│   alerted memory, senders, metrics :9464+i: scheduler─►poll─►normalize─►dedup─►match─►queue─►notify│
-│ MAIN THREAD  live/server.ts — HTTP+SSE API; search parser (─► gliner2 :7100); agent (─► ollama)  │
+│ MAIN THREAD  live/server.ts — one engine (scheduler─►poll─►normalize─►dedup─►match─►queue─►notify)│
+│   + HTTP+SSE API + UI; search parser (─► gliner2 :7100); agent (─► ollama); metrics :9464        │
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
    ui/ (React, static) ◄── browser, through an SSH tunnel on :8080
 
-Push feed (profile "feed", scripts/feed-steps.sh): feed-gen ─► feed-lb (nginx :8091, hash on
-  X-Route-Key; one server line per worker, max_fails=0) ─► N ingest workers (own dedup memory) ─► feed-sink
+┌─ cluster profile: scripts/cluster-steps.sh, on demand (live stopped meanwhile) ────────────────┐
+│ dispatchers ─► engine-lb (nginx, hash on dispatcher id; one server line per engine, max_fails=0) │
+│   ─► engine 1 / engine 2 / engine 3 (containers, 1 core each; own logins, rate limits, alerted   │
+│      memory) ─► cluster-world (boards :7001, alert channel :7002, dispatcher registration :7003) │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 Telemetry: OTLP ─► otel-collector ─► tempo (traces) / loki (logs) / langfuse (model calls);
-  prometheus scrapes live + ingest workers (Docker DNS) → error budgets, burn-rate alerts; grafana :3000.
+  prometheus scrapes live + cluster engines (Docker DNS) → error budgets, burn-rate alerts; grafana :3000.
 ```
 
 Speed is adjustable live without restarting. Saving/removing a search rebuilds the matcher index and polling plans (LLD §6.10).
@@ -183,11 +170,21 @@ Polling the gated lane is what explodes at scale; moving volume into the shared 
 
 *Example:* a Chicago→Atlanta load posted at 9:02:10 is matched and alerted by 9:02:16 — 6 s end to end; a later cross-post of the same load is deduped, no second alert.
 
-### 3.5 Scaling out: engine workers and the push feed (measured, SLO.md)
+### 3.5 Scaling out: the engine cluster (measured, SLO.md)
 
-**Polling lane:** `--engine-workers N` shards dispatchers — logins, rate limits, alerted memory, senders — across N threads; nothing shared, no load balancer needed. 2 workers give 1.77× the board requests of 1 (3,745 → 6,617/s).
+One engine holds the SLOs to ~3,000 board requests/s. Past that, engine containers (`cluster/engine.ts`) run behind nginx: each starts empty and owns whichever dispatchers' API calls reach it — their logins, rate limits, alerted memory, alerts — polling the boards for only those. nginx picks the engine per request by a consistent hash on the dispatcher id, so one dispatcher's calls always land on the engine that owns it.
 
-**Push lane:** nginx hashes postings on a lane key (origin state, destination state, pickup date, equipment) across N ingest workers, so every copy of a load lands on the worker that holds its dedup memory. Throughput 2,050 → 3,346 postings/s from 1 to 3 workers; duplicates 1.7–2.7% with hash routing. One `server` line per worker and `max_fails=0` stop nginx from re-routing a worker's loads after one failed request.
+**Why hash on dispatcher:** everything about a dispatcher has to live in one place. Round robin sends a dispatcher's calls to engines that don't own it — measured: 48% duplicate alerts, 54% misrouted (404) calls. One `server` line per engine, `max_fails=0` (one failed request must not move a dispatcher elsewhere), 65 s keep-alive.
+
+6,000 dispatchers, 1×:
+
+| | 1 engine | 2 engines | 3 engines |
+| --- | --- | --- | --- |
+| Board requests/s | 2,989 | 5,590 | 6,052 |
+| Alerts within 60 s | 85% | 100% | 100% |
+| Duplicate alerts / misrouted calls | 0 / 0 | 0 / 0 | 0 / 0 |
+
+**Maximum with 3 engines:** 9,000 dispatchers → 6,728 board requests/s, 100% within 60 s. The third engine adds less because the 4-core machine is full (3 engines + world + nginx + dispatcher generator); 12,000 dispatchers falls to 87% within 60 s, past the limit.
 
 ## 4. Decisions, alternatives and trade-offs
 
@@ -202,9 +199,8 @@ The ~10–15 that matter most. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has
 | 5 | **Matcher index on geohash level 3**, then exact distance checks | Measured 6–20 candidate cells per search vs 99–474 at level 4 | DB range query on lat/lon; R-tree; level 4 | Some false candidates, removed by exact checks |
 | 6 | **State in memory, partitioned by key; no shared store on the hot path** | No network call per load; atomic updates for free | Redis between every stage; a stream from day one | A crash loses all in-memory state (no snapshot yet); a log (Kafka) is added only on a measured trigger (LLD §12) |
 | 7 | **LLM only on the cold path** (search parsing), behind rules, with confirmation; "should I take it" = a model reading comments, code applying the policy, on local models (Ollama/Qwen) | ~1 s/call is fine once per search, not per posting; measured 88–100% accuracy vs 21–42% for a model making the whole decision | LLM per posting; a full tool-calling agent; a hosted API | Messy searches need confirmation; local models are slower/weaker than a hosted API |
-| 8 | **Engine sharded by dispatcher** (`--engine-workers N` threads) | Each worker owns its dispatchers' logins, state and alerts; nothing shared, no load balancer needed | Shard by board; one process per worker | Measured 1.77× requests with 2 workers (3,745 → 6,617/s); ~6,100–6,600/s is this 4-core machine's ceiling |
-| 9 | **Push feed: nginx hashing on a lane key**; one `server` line per worker, `max_fails=0`, 65 s worker keep-alive | Dedup memory is per worker; every copy of a load must reach the same one; nginx's defaults would re-route a worker's loads after one failed request | Round robin (copies reach different workers; measured 43% duplicate alerts vs 2% hashed); a shared dedup store | Uneven load if a few lanes are hot; production needs an edge tier or Kafka key to compute the lane key |
-| 10 | **Live mode as one container, several threads** (world, engine, main) | The engine must not share a core with the boards it polls; one clock serves both | One thread; separate processes per simulator | Message passing between threads; still one process to restart |
+| 8 | **Engine cluster behind nginx, hash on dispatcher id**; one `server` line per engine, `max_fails=0`, 65 s keep-alive | Everything about a dispatcher — logins, rate limits, alerted memory — must live in one engine; nginx's defaults would move it elsewhere after one failed request | Round robin (measured 48% duplicate alerts, 54% misrouted calls); threads in one process | Uneven load if a few dispatchers are hot; a crashed engine's dispatchers don't move to another yet (no handover, §8) |
+| 9 | **Live mode as one container, two threads** (world, main) | The engine must not share a core with the boards it polls; one clock serves both | One thread; separate processes per simulator | Message passing between threads; still one process to restart |
 
 ## 5. What breaks first at 1000x (current view, measured where available)
 
@@ -214,8 +210,8 @@ The ~10–15 that matter most. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has
 | --- | --- | --- | --- |
 | 1 | **Login budgets** (outside our servers) | Per-login rate limits cap check frequency long before our CPU does | Merge queries better; adaptive intervals; **move volume to shared and partner feeds** |
 | 2 | **Alert delivery** | A hot load matching thousands of users means minutes of queueing at 30 msg/s | Prioritize by load age; digests; several senders; in-app push as the main channel |
-| 3 | **HTTP pools, then one CPU core** | Undersized pools make data stale with no errors; measured: one engine thread holds all SLOs to 2,000 dispatchers, breaks the speed SLO at 5,000 | Size pools by Little's law; worker threads partitioned by login, then more machines |
-| 4 | **In-memory state and GC** | Dedup and alerted sets grow with postings × logins; big heaps mean long GC pauses | Compact entries, drop old buckets, partition across workers and machines |
+| 3 | **HTTP pools, then one CPU core** | Undersized pools make data stale with no errors; measured: one engine holds all SLOs to ~3,000 dispatchers | Size pools by Little's law; the engine cluster (§3.5), then more machines |
+| 4 | **In-memory state and GC** | Dedup and alerted sets grow with postings × logins; big heaps mean long GC pauses | Compact entries, drop old buckets, partition across engines and machines |
 | 5 | **Matcher on hot cells** | Chicago or Dallas vans concentrate shared-feed fan-out | Shard by `(cell, equipment)`; dedicated workers for hot cells |
 | 6 | **Login storage** (security, not throughput) | Thousands of customers' board passwords are the most sensitive data in the system | Encryption keys in a KMS, per-tenant isolation, audit logs |
 
@@ -223,8 +219,8 @@ The ~10–15 that matter most. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has
 
 | Stage | Example size | Runs as | Next limit | Response |
 | --- | --- | --- | --- | --- |
-| Today (measured, SLO.md) | 2,000 dispatchers within all SLOs on one engine thread; speed SLO breaks at 5,000. 2 engine workers: 1.77× (6,617/s) | Engine workers (threads), world on its own thread | The 4-core machine | Workers on more machines, with leases for login ownership |
-| 10x | ~50,000 customers | + worker threads partitioned by login | One CPU core (JSON parsing) | Threads, then processes |
+| Today (measured, SLO.md) | 1 engine within all SLOs to ~3,000 dispatchers; the cluster adds engines behind nginx — 3 engines: 9,000 dispatchers, ~6,700 board requests/s | Engine cluster (containers), world on its own thread | The 4-core machine is full | Engines on separate machines, with handover when engines are added or removed |
+| 10x | ~50,000 customers | + more machines, each running its own engines behind the same hash | One CPU core (JSON parsing) | Threads, then processes |
 | 100x | ~500,000 customers | Several machines, each owning partitions (login / cell / user) | Alert delivery; memory per machine | More senders, push as a second channel; compact state |
 | 1000x | ~5M customers | Many machines, partitions connected by Kafka; snapshots + log replay | Login budgets as a business limit | Shared and partner feeds wherever possible |
 
@@ -257,9 +253,9 @@ The simulator's answer key scores latency, misses and duplicates exactly — a p
 
 ## 8. Status
 
-Built and running: the data generator, board and alert-channel simulators, scheduler, pollers, normalizer, dedup (exact id + trained classifier), matcher, alert queue, notifier, search parser (rules + GLiNER2/LLM fallback), the "should I take it" agent, observability (metrics, traces, logs, LLM call log), the Grafana dashboard, the scorer (batch and live), live mode (`live/`, `ui/`), and continuous deployment to the server.
+Built and running: the data generator, board and alert-channel simulators, scheduler, pollers, normalizer, dedup (exact id + trained classifier), matcher, alert queue, notifier, search parser (rules + GLiNER2/LLM fallback), the "should I take it" agent, observability (metrics, traces, logs, LLM call log), the Grafana dashboard, the scorer (batch and live), live mode (`live/`, `ui/`), the engine cluster (`cluster/`, run on demand), and continuous deployment to the server.
 
-**Not built:** workers on separate machines; leases so a failed worker's dispatchers move; snapshots / crash recovery (a restart loses all in-memory state); Grafana panels for the push feed and per engine worker; alerting on failed deploys; a slow-burn SLO alert; a formal step-load harness; parser exclusions ("anywhere but NY").
+**Not built:** engines on separate machines; handover when engines are added or removed; snapshots / crash recovery (a restart loses all in-memory state); Grafana panels for the engine cluster; alerting on failed deploys; a slow-burn SLO alert; a formal step-load harness; parser exclusions ("anywhere but NY").
 
 **Stack:** TypeScript on Node. One engine process with in-memory, partitioned state. Searches and credentials come from flat files, not a database: `searches.ndjson` in batch mode, a JSON file per user in live mode (volume `live_state`). No Redis or Kafka until a measured trigger (LLD §12). LLD §13 describes where a real database (Postgres) and snapshot/log replay would go in production.
 

@@ -30,10 +30,9 @@ explained from zero.
 
 - **Live, 300 dispatchers, 30 h:** 100% of alerts within 60 s (typical 2.7 s, p99 9.3 s); 0 bans and 0
   rate-limit responses in 33 million board requests; duplicates 0.03%. Completeness 96–97% (target 99%).
-- **Capacity:** one engine thread serves ~2,000 dispatchers within every SLO, breaking between 2,000 and 5,000.
-  Split into 2 **engine workers**, the same load got 1.77× the throughput (3,745 → 6,617 board requests/s), 0 bans.
-- **Push feed** behind nginx (hash routing): 1 → 2 → 3 ingest workers (one core each) take 2,050 → 2,935 → 3,346
-  postings/s; duplicate alerts 1.7–2.7%, vs 43% with round robin.
+- **Engine cluster** (engines behind nginx, hashed on dispatcher id): 1 engine ~3,000 board requests/s, 2 engines
+  5,590/s, 3 engines up to ~6,700/s — 9,000 dispatchers within the SLO. Hash routing: 0 duplicate alerts, vs 48%
+  with round robin. Run it with `scripts/cluster-steps.sh`.
 - **Dedup classifier:** 99.85% precision, 99.4% recall (27 wrong merges, 101 missed, on 61,122 held-out pairs).
   End to end: missed alerts 1.80%, duplicate alerts 0.00%.
 - **Search parser:** 98% of test searches fully right with rules + GLiNER2.
