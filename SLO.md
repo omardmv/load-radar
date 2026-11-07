@@ -77,6 +77,22 @@ dispatchers, 100K loads/day, 1×, 2 min warm-up, 5 min measured; round robin is 
 Maximum with 3 engines: 9,000 dispatchers → 6,728 board requests/s, 100% within 60 s; 12,000 → 6,481/s, 87%
 within 60 s (past the limit).
 
+**CPU at each engine count's maximum** (cores = hardware threads busy; the server has 8 on 4 physical cores).
+Per container from `docker stats`, whole machine from `/proc/stat`, averaged over the 5 measured minutes:
+
+| | 1 engine, 6,000 dispatchers | 2 engines, 6,000 | 3 engines, 9,000 |
+| --- | --- | --- | --- |
+| Board requests/s | 3,071 | 5,841 | 6,856 |
+| Alerts within 60 s | 99.9% | 100% | 100% |
+| Engines | 1.01 | 1.97 | 2.93 |
+| Simulated boards + answer key | 0.48 | 0.77 | **1.01** (its one thread is full) |
+| nginx + dispatcher generator | 0.09 | 0.09 | 0.13 |
+| Everything else (Prometheus, Grafana, models idle) | 0.33 | 0.34 | 0.35 |
+| **Whole machine** | **2.05** | **3.35** | **4.57** |
+
+One engine core handles ~3,000 board requests/s (~0.33 ms of CPU per request). With 3 engines the limit is the
+test rig, not the engines: the simulated boards run on one thread, which is full, and the 4 physical cores are busy.
+
 Hashing on the dispatcher id keeps everything about a dispatcher on one engine, so duplicates and misrouted calls
 stay at 0. Round robin sends a dispatcher's calls to engines that don't own it: 48% duplicate alerts, 54%
 misrouted. nginx rules: one `server` line per engine, `max_fails=0` (one failed request must not move a
