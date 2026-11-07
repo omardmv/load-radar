@@ -61,52 +61,90 @@ At 2,000 dispatchers and 100K loads/day, board requests outnumber new loads abou
 | ~52% of board rows are duplicates; loads are cross-posted, re-posted and co-brokered; 30% have no rate | Measured on a public board, built into the simulator (`sim/ASSUMPTIONS.md`) | Two-stage dedup; an explicit policy for loads with no rate |
 | LLMs are slow (~1 s) and cost money | General | No LLM per posting. LLMs only when a search is created |
 
-## 3. Architecture
+## 3. System design and architecture
+
+Two views of the same system. The **system design** view is the logic: what happens to a posting, and the decisions
+that shape it (no product names). The **architecture** view is what actually runs, where, and how the parts connect.
+
+### System design: what happens and why
 
 ```mermaid
 flowchart LR
-  subgraph CP["Control plane: when a search is created (rare)"]
-    U[Dispatcher] -->|"need reefer out of Fresno, 3.40+"| API[Search API]
-    API --> PARSE["Search parser<br/>rules first; GLiNER2 only if equipment<br/>or origin is missing; asks, never guesses"]
-    PARSE --> STORE[(Searches)]
-    STORE --> PLAN["Plan compiler<br/>poll plan per login<br/>+ matcher index"]
+  subgraph CP["Control plane: a dispatcher saves a search (rare, accuracy matters)"]
+    U[Dispatcher] --> PARSE["Understand the search<br/>rules first, a model only if unsure;<br/>ask instead of guessing"]
+    PARSE --> SEARCHES[(Saved searches)]
+    SEARCHES --> PLAN["Plan the polling<br/>merge a dispatcher's overlapping searches;<br/>budget per login, busy lanes more often (√ rule)"]
+    SEARCHES --> INDEX["Match index<br/>area × equipment → searches"]
   end
 
-  subgraph SRC["Sources"]
-    GATED["Gated boards<br/>DAT, Truckstop, broker portals<br/>(per-customer login)"]
-    SHARED["Partner push feeds<br/>brokers / syndication POST each posting<br/>(received once, for everyone)"]
+  subgraph POLL["Polling lane: boards that need each customer's own login<br/>split by DISPATCHER: everything about one dispatcher in one place, nothing shared"]
+    SCHED["Decide when to check<br/>stay inside each login's budget;<br/>one request at a time per login; back off on 'slow down'"]
+    FETCH["Fetch with the customer's login"]
+    N1["Normalize<br/>one format; who may see it"]
+    D1["Dedup<br/>same id, then 'same load?' model"]
+    M1["Match<br/>only that customer's searches"]
   end
 
-  LB["Load balancer (nginx)<br/>hash on lane key: every copy of a load<br/>reaches the same ingest worker"]
-  INGEST["Ingest workers ×N, one core each<br/>normalize → dedup → match all searches"]
-
-  subgraph DP["Data plane: every posting (hot path, no LLM). Engine workers ×N: each owns 1/N of the dispatchers"]
-    SCHED["Scheduler<br/>per-login budget, busy lanes more often,<br/>1 request in flight per login, duplicate polls<br/>coalesced, backoff, circuit breaker"]
-    POLL[Poller pool]
-    NORM["Normalizer<br/>board format → one Load schema<br/>+ who may see it"]
-    DEDUP["Dedup<br/>1: exact (board id, content hash)<br/>2: trained classifier (logistic regression)"]
-    MATCH["Matcher<br/>index: origin cell × equipment × date<br/>then exact filters + entitlement"]
-    Q["Alert queue<br/>oldest first, freshest first when overloaded,<br/>drop stale, one alert per user per load"]
-    SEND["Notifier<br/>rate limits per bot and per chat,<br/>digests, several channels"]
+  subgraph PUSH["Push lane: partners send each load once, for everyone<br/>split by LOAD: every copy of a load to the same place, so dedup sees them all"]
+    ROUTE["Route by lane key<br/>origin, destination, pickup date, equipment"]
+    N2["Normalize"]
+    D2["Dedup"]
+    M2["Match<br/>every customer's searches"]
   end
 
-  PLAN --> SCHED
-  PLAN --> MATCH
-  SCHED --> POLL --> GATED
-  GATED --> NORM
-  SHARED --> LB --> INGEST --> Q
-  NORM --> DEDUP --> MATCH --> Q --> SEND --> PHONE[Dispatcher's phone / web]
-  PHONE -->|"Should I take it?"| AGENT["Load-decision agent<br/>local model reads the broker's comments,<br/>code applies the dispatch policy:<br/>book / negotiate / ask / skip"]
+  subgraph OUT["Alerts"]
+    Q["Queue<br/>one alert per dispatcher per load;<br/>freshest first when behind, drop stale"]
+    SEND["Deliver<br/>within each channel's limits; digests"]
+  end
 
-  OBS["Observability: OpenTelemetry traces and logs, Prometheus metrics,<br/>SLOs with burn-rate alerts, every model call in Langfuse"]
-  DP -.-> OBS
-  CP -.-> OBS
-  AGENT -.-> OBS
+  PLAN --> SCHED --> FETCH --> N1 --> D1 --> M1 --> Q
+  INDEX --> M1
+  INDEX --> M2
+  PARTNERS[Partners] --> ROUTE --> N2 --> D2 --> M2 --> Q
+  Q --> SEND --> PHONE[Dispatcher]
+  PHONE -->|"Should I take it?"| DECIDE["Decide<br/>a model reads the broker's comments;<br/>code applies the dispatch policy"]
 ```
+
+### Architecture: what runs where
+
+```mermaid
+flowchart TB
+  BROWSER["Browser (UI)"] -->|SSH tunnel :8080| MAIN
+  GH[(GitHub main)] -->|cron pulls every minute, rebuilds| SERVER
+
+  subgraph SERVER["Linux server: 4 cores, Docker Compose"]
+    subgraph LIVE["live container: one Node.js process"]
+      MAIN["Main thread<br/>HTTP API + SSE, search parser, agent"]
+      EW["Engine workers ×N (threads)<br/>each owns 1/N of the dispatchers<br/>metrics :9464+i"]
+      WORLD["World thread<br/>simulated boards :7001, Telegram :7002,<br/>answer key"]
+      MAIN <-->|messages| EW
+      EW -->|HTTP polls, alerts| WORLD
+    end
+    subgraph FEED["Push feed: profile 'feed', started by scripts/feed-steps.sh"]
+      GEN["feed-gen<br/>plays the partners"] -->|"POST /loads + X-Route-Key"| LB["feed-lb (nginx)<br/>:8091 hash, :8090 round robin<br/>one server line per worker, max_fails=0"]
+      LB --> ING["feed-ingest ×N<br/>cpus: 1 each"]
+      ING -->|alert batches| SINK["feed-sink<br/>scores latency, duplicates"]
+    end
+    MODELS["gliner2 :7100 (search parsing)<br/>ollama :11434 (agent)"]
+    subgraph OBS["Observability"]
+      PROM["Prometheus<br/>SLO rules, burn-rate alerts"]
+      OTEL["OTel collector → Tempo, Loki, Langfuse"]
+      GRAF["Grafana :3000"]
+    end
+    MAIN --> MODELS
+    EW -. metrics .-> PROM
+    ING -. "metrics (found by Docker DNS)" .-> PROM
+    MAIN -. traces, logs .-> OTEL
+    PROM --> GRAF
+    OTEL --> GRAF
+  end
+```
+
+The detailed version of the live container, thread by thread, is next.
 
 ### 3.0 Live mode: the same pipeline, running continuously
 
-The `live` service runs the whole diagram above continuously, with a UI, instead of a batch run against a fixed
+The `live` service runs the system design above continuously, with a UI, instead of a batch run against a fixed
 dataset. It's one container with **several threads**: the simulated outside world gets its own event loop and core, so
 the engine doesn't share a CPU with the boards it polls, and with `--engine-workers N` (`LIVE_ENGINE_WORKERS`) the engine
 itself runs as N threads, each owning 1/N of the dispatchers (default 0: the engine on the main thread).
@@ -207,6 +245,18 @@ Polling the gated lane is what explodes at scale. **Moving volume into the share
 
 **Notifier.** Token buckets enforce ~30 msg/s per bot and ~1 msg/s per chat. When one chat has several pending alerts, they're merged into one digest. It supports several bots and channels (in-app push, Telegram, email).
 
+### 3.4 One posting's journey
+
+> 9:02:10. A broker posts a Chicago → Atlanta van load, $1,950, on DAT, picking up today.
+>
+> 1. **9:02:14:** the scheduler fires customer #318's merged "vans around Chicago" query (a busy lane, checked every ~5 s).
+> 2. The poller gets DAT results. The normalizer turns `"CHICAGO HEIGHTS, IL"`, `"V"`, `1950` into a `Load` with coordinates, `equipment=van`, `visible_to=customer #318`.
+> 3. **Dedup:** the board id is new. The classifier finds no earlier posting of this load, so it's new.
+> 4. **Matcher:** cell `dp3w` + van + today gives 3 candidate searches from customer #318. Two pass the deadhead and rate filters.
+> 5. **Queue:** one alert for customer #318 (the key is per user per load, so two matching searches still mean one alert).
+> 6. **9:02:16:** the notifier sends it to Telegram. **Post-to-alert: 6 seconds.**
+> 7. **9:03:40:** the same broker cross-posts on Truckstop at $1,975. Customer #318's Truckstop query finds it. The classifier says same load, so no second alert.
+
 ### 3.5 Scaling out: engine workers and the push feed (measured, SLO.md)
 
 **Polling lane: shard by dispatcher.** `--engine-workers N` runs the engine as N threads, each owning 1/N of the
@@ -220,18 +270,6 @@ destination state, pickup date, equipment) that every copy of a load shares. Rou
 measured 43% duplicate alerts vs 2% with hash routing. Throughput 2,050 -> 3,346 postings/s from 1 to 3 workers.
 Two nginx details matter for stateful routing: one `server` line per worker (a name resolving to several addresses
 isn't hashed between them), and `max_fails=0` (otherwise one failed request moves a worker's loads elsewhere for 10 s).
-
-### 3.4 One posting's journey
-
-> 9:02:10. A broker posts a Chicago → Atlanta van load, $1,950, on DAT, picking up today.
->
-> 1. **9:02:14:** the scheduler fires customer #318's merged "vans around Chicago" query (a busy lane, checked every ~5 s).
-> 2. The poller gets DAT results. The normalizer turns `"CHICAGO HEIGHTS, IL"`, `"V"`, `1950` into a `Load` with coordinates, `equipment=van`, `visible_to=customer #318`.
-> 3. **Dedup:** the board id is new. The classifier finds no earlier posting of this load, so it's new.
-> 4. **Matcher:** cell `dp3w` + van + today gives 3 candidate searches from customer #318. Two pass the deadhead and rate filters.
-> 5. **Queue:** one alert for customer #318 (the key is per user per load, so two matching searches still mean one alert).
-> 6. **9:02:16:** the notifier sends it to Telegram. **Post-to-alert: 6 seconds.**
-> 7. **9:03:40:** the same broker cross-posts on Truckstop at $1,975. Customer #318's Truckstop query finds it. The classifier says same load, so no second alert.
 
 ## 4. Decisions, alternatives and trade-offs
 
