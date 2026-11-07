@@ -30,7 +30,7 @@ requests/s = dispatchers × board logins each × requests per login per second
    × 1000 growth (5 million dispatchers)                                   ≈ 4.7 million/s
 ```
 
-One engine serves ~3,000 board requests/s within the SLOs; three engines behind nginx serve ~6,700/s on this 4-core machine — enough for 9,000 dispatchers (§3.5, SLO.md). 4.7 million/s would need roughly 1,500 engines that way. Moving volume to partner feeds (§3.5) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
+One engine serves ~3,000 board requests/s within the SLOs; three engines behind nginx serve ~6,700/s on this 4-core machine — enough for 9,000 dispatchers (§3.5, SLO.md). 4.7 million/s would need roughly 1,500 engines that way. Moving volume to partner feeds (fetched once for everyone) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
 
 ## 2. Constraints that shape the design
 
