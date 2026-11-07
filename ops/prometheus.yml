@@ -5,7 +5,7 @@ rule_files: [/etc/prometheus/rules.yml]   # SLIs, error budgets, burn-rate alert
 scrape_configs:
   - job_name: load-radar-engine
     static_configs:
-      - targets: ["live:9464", "live:9465", "live:9466", "app:9464"]   # live :9465+ only with --engine-workers 2+
+      - targets: ["live:9464", "app:9464"]
   - job_name: load-radar-live          # answer-key counters for the SLOs
     static_configs:
       - targets: ["live:8080"]

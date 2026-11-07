@@ -1,8 +1,7 @@
 // Live mode: one always-on process with the whole loop, fresh data every start. Two threads, two cores:
-//   world thread (live/world-worker.ts): new loads forever -> simulated boards (:7001) and Telegram (:7002), live answer key
-//   main thread (this file): engine (poll boards over HTTP, dedup, match, alert to Telegram over HTTP) + API + UI
-//   --engine-workers N (N >= 1): the engine moves off the main thread into N shards (live/engine-worker.ts), each
-//   owning 1/N of the dispatchers and its own core; metrics on :9464, :9465, ... (one Prometheus target each)
+//   world thread (live/world-worker.ts): new loads forever -> simulated boards (:7001) and the web alert channel (:7002), live answer key
+//   main thread (this file): engine (poll boards over HTTP, dedup, match, send alerts over HTTP) + API + UI
+// Scaling out to several engines is the cluster (cluster/, behind nginx), not this process.
 //
 //   node live/server.ts --port 8080 --gliner http://gliner2:7100 --otlp http://otel-collector:4318/v1/traces
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -26,7 +25,6 @@ import type { ModelCall } from '../src/parse/types.ts';
 import { setupLlmTracing } from '../src/obs/llm.ts';
 import { setupLogs } from '../src/obs/log.ts';
 import type { ToWorld, WorldInit } from './world-worker.ts';
-import type { EngineShardInit, ToShard } from './engine-worker.ts';
 import { runAgent, warmAgent, type AgentMode } from '../src/agent/agent.ts';
 import { decide, type AgentLoad, type Facts, type Truck } from '../src/agent/policy.ts';
 import { milesBetween } from '../src/shared/geo.ts';
@@ -35,7 +33,7 @@ const { values: a } = parseArgs({ options: {
   port: { type: 'string', default: '8080' }, speed: { type: 'string', default: '1' }, 'loads-per-day': { type: 'string', default: '20000' },
   users: { type: 'string', default: '300' }, seed: { type: 'string', default: '' }, budget: { type: 'string', default: '60' },
   gliner: { type: 'string', default: 'http://127.0.0.1:7100' }, otlp: { type: 'string', default: 'off' }, 'metrics-port': { type: 'string', default: '9464' },
-  state: { type: 'string', default: 'data/live' }, 'engine-workers': { type: 'string', default: '0' }, 'dedup-model': { type: 'string', default: '' },
+  state: { type: 'string', default: 'data/live' }, 'dedup-model': { type: 'string', default: '' },
   ollama: { type: 'string', default: 'http://127.0.0.1:11434' }, 'agent-model': { type: 'string', default: 'qwen2.5:3b-instruct' }, 'agent-mode': { type: 'string', default: 'hybrid' } } });
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -100,46 +98,8 @@ await new Promise<void>((resolve) => worldThread.on('message', (m) => {
     for (const x of m.alert.loads) log('info', 'alert.sent', { user: YOU, load_id: x.loadId, latency_sec: x.latencySec ?? undefined, expected: x.expected, late: x.late, backfill: x.backfill, text: m.alert.lines.join(' | ') });
   }
 }));
-const engine = await startEngines(Number(a['engine-workers']));
-
-// The engine: on this thread (0 workers, the default), or split into N shards on their own threads. Shards split
-// the dispatchers round-robin (you are always on shard 0) and the 4 Telegram bots between them, so total delivery
-// capacity is the same whatever N is: only the engine's CPU changes.
-type EngineCounts = ReturnType<Awaited<ReturnType<typeof startEngine>>['counts']>;
-async function startEngines(n: number) {
-  const BOTS = 4, metricsPort = Number(a['metrics-port']) || null, dedupModel = a['dedup-model'] || null;
-  if (n < 1) {
-    const e = await startEngine({ users, boardsUrl: 'http://127.0.0.1:7001', telegramUrl: 'http://127.0.0.1:7002', clock, budgetPerMin: Number(a.budget),
-      connectionsPerBoard: 64, metricsPort, otlpEndpoint: otlp, sampleRate: 0.01, maxUsers: 0, bots: BOTS, dedupModel });
-    return { counts: e.counts, refreshSearches: async () => e.refreshSearches(), setClock: () => {} };
-  }
-  const shards: Worker[] = [];
-  const counts: (EngineCounts | null)[] = Array(n).fill(null);
-  const replies = new Map<number, (cancelled: number) => void>();
-  let reqId = 0;
-  const botsPer = Math.max(1, Math.floor(BOTS / n));
-  for (let i = 0; i < n; i++) {
-    const init: EngineShardInit = { shard: i, anchor: clock.anchor(), users: users.filter((_, j) => j % n === i), budget: Number(a.budget),
-      metricsPort: metricsPort ? metricsPort + i : 0, otlp, dedupModel, bots: botsPer, botOffset: i * botsPer };
-    const w = new Worker(new URL('./engine-worker.ts', import.meta.url), { workerData: init });
-    w.on('error', (e) => { log('error', 'engine_shard.crashed', { shard: i, error: String(e) }); process.exit(1); });
-    await new Promise<void>((resolve) => w.on('message', (m) => {
-      if (m.type === 'ready') resolve();
-      else if (m.type === 'counts') counts[m.shard] = m.counts;
-      else if (m.type === 'refreshed') { replies.get(m.reqId)?.(m.cancelled); replies.delete(m.reqId); }
-    }));
-    shards.push(w);
-  }
-  log('info', 'engine.sharded', { workers: n, users_per_shard: users.length / n, bots_per_shard: botsPer });
-  const add = (x: unknown, y: unknown): unknown => typeof x === 'number' && typeof y === 'number' ? x + y
-    : x && y && typeof x === 'object' ? Object.fromEntries(Object.keys(x).map((k) => [k, add((x as Record<string, unknown>)[k], (y as Record<string, unknown>)[k])])) : x;
-  return {
-    counts: () => counts.filter((c): c is EngineCounts => c !== null).reduce((s, c) => add(s, c) as EngineCounts),
-    // Only your searches change from the UI, and you live on shard 0.
-    refreshSearches: () => new Promise<number>((resolve) => { const id = ++reqId; replies.set(id, resolve); const m: ToShard = { type: 'searches', reqId: id, userId: YOU, searches: you.searches }; shards[0].postMessage(m); }),
-    setClock: () => { for (const w of shards) w.postMessage({ type: 'clock', anchor: clock.anchor() } satisfies ToShard); },
-  };
-}
+const engine = await startEngine({ users, boardsUrl: 'http://127.0.0.1:7001', telegramUrl: 'http://127.0.0.1:7002', clock, budgetPerMin: Number(a.budget),
+  connectionsPerBoard: 64, metricsPort: Number(a['metrics-port']) || null, otlpEndpoint: otlp, sampleRate: 0.01, maxUsers: 0, bots: 4, dedupModel: a['dedup-model'] || null });
 
 setInterval(() => exportScore(), 5_000);
 
@@ -195,7 +155,7 @@ let nextSearch = saved.reduce((n, s) => Math.max(n, Number(s.spec.searchId.slice
 
 // Saving or removing a search: rebuild the engine's index and polling plans, cancel orphaned alerts, rebuild the answer key.
 const refresh = () => span('engine.refresh_searches', {}, async (s) => {
-  const cancelled = await engine.refreshSearches();
+  const cancelled = engine.refreshSearches();
   toWorld({ type: 'searches', userId: YOU, searches: you.searches, createdAt: [...createdAt] });   // the answer key follows
   s?.setAttributes({ 'searches.total': users.reduce((n, u) => n + u.searches.length, 0), 'alerts.cancelled': cancelled });
   return cancelled;
@@ -251,7 +211,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, url: URL, reqSp
       }
       return json(res, 200, { ok: true });
     }
-    if (url.pathname === '/api/speed' && req.method === 'POST') { clock.setSpeed(Math.min(120, Math.max(1, Number((await body(req)).speed) || 1))); toWorld({ type: 'clock', anchor: clock.anchor() }); engine.setClock(); log('info', 'control.speed', { speed: clock.speed }); return json(res, 200, { speed: clock.speed }); }
+    if (url.pathname === '/api/speed' && req.method === 'POST') { clock.setSpeed(Math.min(120, Math.max(1, Number((await body(req)).speed) || 1))); toWorld({ type: 'clock', anchor: clock.anchor() }); log('info', 'control.speed', { speed: clock.speed }); return json(res, 200, { speed: clock.speed }); }
     if (url.pathname === '/api/rate' && req.method === 'POST') {
       const loadsPerDay = Math.min(500_000, Math.max(1_000, Number((await body(req)).loadsPerDay) || 20_000));
       toWorld({ type: 'rate', loadsPerDay }); ws.loadsPerDay = loadsPerDay;
