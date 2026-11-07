@@ -39,7 +39,7 @@ export async function startEngine(cfg: EngineConfig) {
   const heat = createHeat(clock);
   const alertQueue = createAlertQueue({ clock, freshAfterMs: 10_000, deadlineMs: 10 * 60_000, ttlMs: 72 * 3_600_000 });
   const counts = { polls: 0, postings: 0, newLoads: 0, alertsQueued: 0, alertsSent: 0 };
-  // Entitlement (LLD 6.6): each customer fetches the same posting with their own login. Dedup decides which real
+  // Entitlement (LLD 6.7): each customer fetches the same posting with their own login. Dedup decides which real
   // load it is; matching must still run once per (who may see it, load), or only the first customer is alerted.
   const matchedFor = createExpiringSet(72 * 3_600_000, 3_600_000, clock);
 
