@@ -12,14 +12,19 @@ scrape_configs:
   - job_name: otel-collector-llm
     static_configs:
       - targets: ["otel-collector:8889"]
-  - job_name: feed-ingest              # push-feed workers: every replica of the service (Docker DNS)
+  - job_name: cluster-engine            # engine workers: every replica (Docker DNS); pipeline metrics
     dns_sd_configs:
-      - names: [feed-ingest]
+      - names: [engine]
         type: A
         port: 9464
-  - job_name: feed-gen
+  - job_name: cluster-engine-api        # the same replicas: dispatcher API metrics
+    dns_sd_configs:
+      - names: [engine]
+        type: A
+        port: 8080
+  - job_name: cluster-world
     static_configs:
-      - targets: ["feed-gen:9464", "feed-gen:9465"]
-  - job_name: feed-sink
+      - targets: ["cluster-world:9464"]
+  - job_name: cluster-dispatchers
     static_configs:
-      - targets: ["feed-sink:9464"]
+      - targets: ["dispatchers:9464"]

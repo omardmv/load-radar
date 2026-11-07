@@ -20,7 +20,7 @@ import { createAlertQueue } from './alerts/alert-queue.ts';
 import { createNotifier } from './alerts/notifier.ts';
 import { setupObs } from './obs/obs.ts';
 
-export type EngineConfig = { dataDir?: string; users?: User[]; boardsUrl: string; telegramUrl: string; clock: Clock; budgetPerMin: number; connectionsPerBoard: number; metricsPort: number | null; otlpEndpoint: string | null; sampleRate: number; maxUsers: number; bots: number; botOffset?: number; dedupModel?: string | null };
+export type EngineConfig = { dataDir?: string; users?: User[]; boardsUrl: string; telegramUrl: string; clock: Clock; budgetPerMin: number; connectionsPerBoard: number; metricsPort: number | null; otlpEndpoint: string | null; sampleRate: number; maxUsers: number; bots: number; botOffset?: number; botPrefix?: string; dedupModel?: string | null; onAlertsSent?: (alerts: Alert[], at: number) => void };
 export type EngineSummary = { polls: number; postings: number; newLoads: number; alertsQueued: number; alertsSent: number; alertsDropped: number; scheduler: SchedulerStats };
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -106,14 +106,14 @@ export async function startEngine(cfg: EngineConfig) {
   const notifier = createNotifier({ clock, queue: alertQueue, bots: cfg.bots, perBotPerSec: 30, perChatPerSec: 1, maxDigest: 5, burstDigest: 20, deadlineMs: 10 * 60_000, maxHeldPerChat: 200,
     send: async (botId, chatId, alerts) => {
       try {
-        const res = await fetch(`${cfg.telegramUrl}/bot${(cfg.botOffset ?? 0) + botId}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        const res = await fetch(`${cfg.telegramUrl}/bot${cfg.botPrefix ?? ''}${(cfg.botOffset ?? 0) + botId}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ chat_id: chatId, text: alerts.map((x) => x.summary).join('\n'), meta: { loads: alerts.map((x) => ({ loadKey: x.loadKey, canonicalId: x.canonicalId, postedAt: x.postedAt })) } }) });
         if (res.status === 429) { const j = (await res.json()) as { parameters?: { retry_after?: number } }; return { ok: false, retryAfterSec: j.parameters?.retry_after ?? 1 }; }
         await res.arrayBuffer();
         return { ok: res.ok };
       } catch { return { ok: false, retryAfterSec: 1 }; }
     },
-    onSent: (alerts, at) => { counts.alertsSent += alerts.length; for (const x of alerts) obs.postToAlert((at - x.postedAt) / 1000); } });
+    onSent: (alerts, at) => { counts.alertsSent += alerts.length; for (const x of alerts) obs.postToAlert((at - x.postedAt) / 1000); cfg.onAlertsSent?.(alerts, at); } });
 
   let running = true;
   const maxInFlight = cfg.connectionsPerBoard * 4;

@@ -30,28 +30,27 @@ services:
     volumes: ["live_state:/state"]          # your saved searches survive restarts and deploys
     depends_on: [gliner2, otel-collector, ollama]
 
-  # ---------- Partner push feed (on demand: scripts/feed-steps.sh) ----------
-  # Partners push each posting to nginx, which spreads them over N ingest workers, one core each (DESIGN.md §3.5).
-  #   docker compose --profile feed up -d --scale feed-ingest=2
-  feed-ingest:
+  # ---------- Engine cluster (on demand: scripts/cluster-steps.sh) ----------
+  # Dispatchers' API calls -> nginx (hash on dispatcher id) -> engine workers, one core each; each worker polls the
+  # boards for the dispatchers it owns. The world (boards, alert channel, answer key) is its own container.
+  #   docker compose --profile cluster up -d --scale engine=3
+  cluster-world:
     build: { context: ., dockerfile: live/Dockerfile }
-    profiles: [feed]
-    entrypoint: ["node", "feed/ingest.ts", "--port", "7200", "--metrics-port", "9464", "--sink", "http://feed-sink:7300", "--users", "${FEED_USERS:-2000}"]
-    cpus: 1                                  # one core per worker, enforced
-  feed-lb:
+    profiles: [cluster]
+    entrypoint: ["node", "cluster/world.ts", "--loads-per-day", "${CLUSTER_LOADS_PER_DAY:-100000}"]
+  engine:
+    build: { context: ., dockerfile: live/Dockerfile }
+    profiles: [cluster]
+    entrypoint: ["node", "cluster/engine.ts", "--boards", "http://cluster-world:7001", "--alerts", "http://cluster-world:7002"]
+    cpus: 1                                  # one core per engine worker, enforced
+  engine-lb:
     image: nginx:1.29-alpine
-    profiles: [feed]
-    volumes: ["./feed/nginx.conf:/etc/nginx/nginx.conf:ro", "./feed/upstreams.conf:/etc/nginx/upstreams.conf:ro"]
-    depends_on: [feed-ingest]
-  feed-sink:
+    profiles: [cluster]
+    volumes: ["./cluster/nginx.conf:/etc/nginx/nginx.conf:ro", "./cluster/upstreams.conf:/etc/nginx/upstreams.conf:ro"]
+  dispatchers:
     build: { context: ., dockerfile: live/Dockerfile }
-    profiles: [feed]
-    entrypoint: ["node", "feed/sink.ts", "--port", "7300", "--metrics-port", "9464"]
-  feed-gen:
-    build: { context: ., dockerfile: live/Dockerfile }
-    profiles: [feed]
-    entrypoint: ["node", "feed/push-gen.ts", "--target", "${FEED_TARGET:-http://feed-lb:8091}", "--threads", "2", "--concurrency", "128", "--metrics-port", "9464"]
-    depends_on: [feed-lb]
+    profiles: [cluster]
+    entrypoint: ["node", "cluster/dispatchers.ts", "--api", "http://engine-lb:8080", "--world", "http://cluster-world:7003", "--count", "${CLUSTER_DISPATCHERS:-6000}"]
 
   # ---------- Models for the search parser ----------
   gliner2:
