@@ -32,12 +32,23 @@ This is the **high-level design**: the problem, the constraints, the parts and w
 **Why it's a scaling problem.** New freight is small: a few loads a second. Checking for it is big, because each customer's searches run on **their own login**:
 
 ```
-requests/s = customers × searches each × boards ÷ seconds between checks
-             5,000     ×      4       ×   4    ÷ 15                      ≈ 5,300/s today (guess)
-             × 1000 growth                                               ≈ 5.3 million/s
+requests/s = dispatchers × board logins each × requests per login per second
+   measured:   2,000     ×       1.8        ×   ~0.52                       = 1,882/s   (SLO.md, 1×)
+   per dispatcher: ~0.94 requests/s (each login may poll once a second; merged queries and the
+                   square-root rule spend that budget, quiet lanes are checked less)
+   5,000 dispatchers                                                       ≈ 4,700/s
+   × 1000 growth (5 million dispatchers)                                   ≈ 4.7 million/s
 ```
 
-Reads outnumber new loads about 1000 to 1. **The work is in polling, deduplicating and fanning out, not in the freight itself.**
+The first version of this line was a guess (5,000 × 4 searches × 4 boards ÷ 15 s ≈ 5,300/s). The measured rate is close,
+for different reasons: dispatchers have ~1.8 board logins, not 4, but each login polls more often than every 15 s.
+
+What that costs, from the scale tests (SLO.md): one engine worker serves ~2,000–3,000 requests/s within the SLOs, and 2
+workers did 1.77× one. So 5,000 dispatchers is 2–3 workers (this 4-core server); 4.7 million/s would be ~2,000 workers,
+about 125 machines of 16 cores. Moving volume to push feeds (fetched once for everyone, §3.5) is what bends that curve.
+
+At 2,000 dispatchers and 100K loads/day, board requests outnumber new loads about **1,600 to 1** (1,882/s vs 1.2/s).
+**The work is in polling, deduplicating and fanning out, not in the freight itself.**
 
 ## 2. Constraints that shape the design
 
