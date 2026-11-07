@@ -26,7 +26,7 @@ So the order is:
 | `boards-sim` | replays `out/postings.ndjson` with budgets, 429s, bans, covered loads | — |
 | `telegram-sim` | enforces Telegram rate limits, logs deliveries | — |
 | `scorer` | offline, compares deliveries with the answer key | files |
-| `live` | one always-on process, two threads. **World thread** (`live/world-worker.ts`): `sim/world.ts` as a stream, boards-sim and telegram-sim on 127.0.0.1:7001/7002, the rolling answer key. **Main thread** (`live/server.ts`): `engine`, the UI's HTTP + SSE API, the search parser and the load-decision agent | the threads exchange messages (clock anchor, searches, stats, postings, alerts, load facts); the engine reaches the simulators over HTTP; outside the container: GLiNER2, Ollama, the collector, the browser; saved searches persist in the `live_state` volume |
+| `live` | one always-on process, 2 + N threads. **World thread** (`live/world-worker.ts`): `sim/world.ts` as a stream, boards-sim and telegram-sim on 127.0.0.1:7001/7002, the rolling answer key. **Engine workers** (`live/engine-worker.ts`, `--engine-workers N`): N engines, each owning 1/N of the dispatchers, metrics on :9464+i. **Main thread** (`live/server.ts`): the UI's HTTP + SSE API, the search parser and the load-decision agent; the engine too when N = 0 | the threads exchange messages (clock anchor, searches, stats, postings, alerts, load facts); the engine reaches the simulators over HTTP; outside the container: GLiNER2, Ollama, the collector, the browser; saved searches persist in the `live_state` volume |
 
 Infrastructure in `docker compose` (DEPLOY.md): OpenTelemetry Collector, Tempo, Loki, Prometheus, Grafana (observability), GLiNER2 and Ollama (the search parser's models), self-hosted Langfuse, and the `live` service itself. All of it runs continuously on one Linux server; `app` is the only service that runs on demand.
 
@@ -363,7 +363,7 @@ Implementation: two heaps on `postedAt` (min and max) over the same items, or on
 
 ### 6.10 Live mode (`live/`)
 
-Live mode runs the whole pipeline above continuously instead of as a one-shot batch job, plus a UI: one process, two threads. DESIGN.md §3.0 has the overall diagram; this section is the detail the other components above don't cover.
+Live mode runs the whole pipeline above continuously instead of as a one-shot batch job, plus a UI: one process, 2 + N threads. DESIGN.md §3.0 has the overall diagram; this section is the detail the other components above don't cover.
 
 **`live/world-worker.ts`** — the outside world on its own thread: the stream, boards-sim and telegram-sim (HTTP on 127.0.0.1:7001/7002, so the engine talks to them exactly as to real boards) and the answer key, which must see both loads being born and alerts being delivered. Messages in: `clock` (the new anchor after a speed change), `rate`, `burst`, `searches` (your searches changed: rebuild the answer key), `loadFacts` (the agent asks about one load). Messages out: `ready`, `stats` every second (world, boards, score, the thread's event-loop p99), `postings` every 250 ms, `alert` for your deliveries, `loadFacts` replies.
 

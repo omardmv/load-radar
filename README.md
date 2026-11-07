@@ -27,7 +27,9 @@ documents. This page is the short version plus how to run it.
   0 bans and 0 rate-limit responses in 33 million board requests; duplicates 0.03%. Completeness was 96–97%, below
   the 99% target; two causes found and fixed on 2026-11-06 ([SLO.md](SLO.md)).
 - **Capacity:** one engine thread serves ~2,000 dispatchers within every SLO; the speed SLO breaks between 2,000 and
-  5,000 ([SLO.md](SLO.md)).
+  5,000. Split into 2 engine workers, the same load got 1.77× the board requests (3,745 → 6,617/s) ([SLO.md](SLO.md)).
+- **Push feed behind nginx:** 1 → 3 ingest workers (one core each) took 2,050 → 3,346 postings/s; hash routing kept
+  duplicate alerts at 2%, round robin gave 43% ([SLO.md](SLO.md)).
 - **Dedup classifier:** wrong merges 1,806 → 27 on held-out pairs; end to end, missed alerts 4.73% → 1.80% and
   duplicates 2.74% → 0% ([ML.md](ML.md)).
 - **Search parser:** 98% of test searches fully right with rules + GLiNER2 ([ml/parser/RESULTS.md](ml/parser/RESULTS.md)).

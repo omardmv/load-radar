@@ -176,10 +176,12 @@ everything is verified without unit tests).
 
 ## 5. Architecture
 
-### 5.1 The live service: one process, two threads
+### 5.1 The live service: one process, several threads
 
 Everything in Part 3 runs in one Node.js process. The simulated world runs on a **separate thread with its own CPU
 core**, so the engine never shares a core with the boards it polls. That was a measured problem in the first version.
+The engine can also be split into **N worker threads** (`LIVE_ENGINE_WORKERS=N`), each owning a share of the
+dispatchers; by default it runs on the main thread.
 
 ```
 ┌─ live container ──────────────────────────────────────────────────────────────────────────┐
@@ -189,9 +191,10 @@ core**, so the engine never shares a core with the boards it polls. That was a m
 │     ├─ telegram-sim :7002   30 msg/s per bot, 1 msg/s per chat                             │
 │     └─ live/score.ts        the answer key, scoring every delivery                         │
 │            ▲ HTTP, exactly as to real boards                                               │
-│ MAIN THREAD (live/server.ts)                                                               │
+│ ENGINE WORKERS (live/engine-worker.ts) ×N, each owning 1/N of the dispatchers              │
 │   src/engine.ts   scheduler → pollers → normalize → dedup → match → alert queue → notifier │
-│   HTTP API + SSE for the UI; /api/parse → GLiNER2; /api/agent → Ollama                     │
+│ MAIN THREAD (live/server.ts): HTTP API + SSE for the UI; /api/parse → GLiNER2;             │
+│   /api/agent → Ollama; runs the engine itself when N = 0                                   │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
       ▲ browser (React UI)                    │ telemetry (OpenTelemetry)
                                               ▼
@@ -344,12 +347,12 @@ request per second per dispatcher.
 still free. One engine thread handles about **2,000–3,000 board requests per second** within the targets. Nothing was
 lost at the knee (completeness, 429s and bans held); alerts just got slower.
 
-### 9.3 The path up (estimates, not measured)
+### 9.3 The path up (estimates, except where marked measured)
 
 | Step | Change | Rough capacity |
 | --- | --- | --- |
 | Bigger single core | Same code on a modern server CPU (1.5–2× faster per core) | ~3,000–5,000 dispatchers |
-| **Shard the engine** | N workers, each owning logins by `hash(login) mod N`, with leases in Redis so a dead worker's logins move. Logins are independent, so this splits cleanly; each login's rate limiter stays local | Roughly linear in cores: 16 cores ≈ 35,000–45,000 |
+| **Shard the engine** (built for one machine, measured) | N workers, each owning a share of the dispatchers; across machines, leases in Redis so a dead worker's logins move. Logins are independent, so this splits cleanly; each login's rate limiter stays local | Measured 1.77× with 2 workers on 4 cores (SLO.md); roughly linear in cores: 16 cores ≈ 35,000–45,000 |
 | Many machines | Stateless workers on Kubernetes/Nomad, autoscaled on event-loop lag; many outbound IPs | ~2,500 req/s per worker → 500,000 req/s ≈ 200 workers ≈ 15 × 16-core machines |
 | Partition the data | Postings into Kafka/Redpanda keyed by origin geohash; dedup and matching partitioned by the same key, so candidates are always local | Removes cross-shard lookups |
 | Alerts | Own service, many bots, push/SMS as main channels (Telegram's ~30 msg/s/bot caps delivery long before polling does) | — |

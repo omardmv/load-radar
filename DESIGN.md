@@ -63,10 +63,13 @@ flowchart LR
 
   subgraph SRC["Sources"]
     GATED["Gated boards<br/>DAT, Truckstop, broker portals<br/>(per-customer login)"]
-    SHARED["Open / partner feeds<br/>direct broker posts, syndication<br/>(fetched once)"]
+    SHARED["Partner push feeds<br/>brokers / syndication POST each posting<br/>(received once, for everyone)"]
   end
 
-  subgraph DP["Data plane: every posting (hot path, no LLM)"]
+  LB["Load balancer (nginx)<br/>hash on lane key: every copy of a load<br/>reaches the same ingest worker"]
+  INGEST["Ingest workers ×N, one core each<br/>normalize → dedup → match all searches"]
+
+  subgraph DP["Data plane: every posting (hot path, no LLM). Engine workers ×N: each owns 1/N of the dispatchers"]
     SCHED["Scheduler<br/>per-login budget, busy lanes more often,<br/>1 request in flight per login, duplicate polls<br/>coalesced, backoff, circuit breaker"]
     POLL[Poller pool]
     NORM["Normalizer<br/>board format → one Load schema<br/>+ who may see it"]
@@ -80,7 +83,7 @@ flowchart LR
   PLAN --> MATCH
   SCHED --> POLL --> GATED
   GATED --> NORM
-  SHARED --> NORM
+  SHARED --> LB --> INGEST --> Q
   NORM --> DEDUP --> MATCH --> Q --> SEND --> PHONE[Dispatcher's phone / web]
   PHONE -->|"Should I take it?"| AGENT["Load-decision agent<br/>local model reads the broker's comments,<br/>code applies the dispatch policy:<br/>book / negotiate / ask / skip"]
 
@@ -93,11 +96,12 @@ flowchart LR
 ### 3.0 Live mode: the same pipeline, running continuously
 
 The `live` service runs the whole diagram above continuously, with a UI, instead of a batch run against a fixed
-dataset. It's one container with **two threads**: the simulated outside world gets its own event loop and core, so the
-engine doesn't share a CPU with the boards it polls.
+dataset. It's one container with **several threads**: the simulated outside world gets its own event loop and core, so
+the engine doesn't share a CPU with the boards it polls, and with `--engine-workers N` (`LIVE_ENGINE_WORKERS`) the engine
+itself runs as N threads, each owning 1/N of the dispatchers (default 0: the engine on the main thread).
 
 ```
-┌─ live container: one Node process, two threads ───────────────────────────────────────────────────────────┐
+┌─ live container: one Node process, 2 + N threads ─────────────────────────────────────────────────────────┐
 │ WORLD THREAD  live/world-worker.ts  ("the outside world": its own event loop and core)                     │
 │   sim/world.ts ─► live/stream.ts   new loads forever (Poisson, US Central hour of day); every refresh,      │
 │                                    repost, cross-post and co-broker copy scheduled and released on time   │
@@ -106,17 +110,26 @@ engine doesn't share a CPU with the boards it polls.
 │     └─► live/score.ts        answer key built as each load is born; scores every delivery                 │
 │              ▲ HTTP, exactly as to real boards                │ messages: stats, postings, your alerts,   │
 │              │                                                ▼ load facts for the agent                  │
-│ MAIN THREAD  live/server.ts                                                                                │
+│ ENGINE WORKERS  live/engine-worker.ts ×N  (dispatchers split round robin; each worker owns its share's     │
+│                 logins, rate limits, alerted memory and chats, and 4/N of the Telegram bots: nothing shared)│
 │   src/engine.ts  scheduler (√ budgets, 1 request in flight per login, duplicate polls coalesced)          │
 │                  ─► pollers ─► normalize ─► dedup (exact id, then logistic-regression classifier)          │
 │                  ─► matcher (geohash index) ─► alert queue ─► notifier (digests; under backlog freshest    │
-│                     first, stale dropped) ─► telegram-sim                                                  │
+│                     first, stale dropped) ─► telegram-sim          metrics :9464, :9465, ... one per worker │
+│ MAIN THREAD  live/server.ts  (runs the engine itself when N = 0)                                           │
 │   HTTP + SSE  /api/state /api/events /api/searches /api/speed /api/rate /api/burst                         │
 │               /api/parse ─► rules; GLiNER2 only if equipment/origin missing ─────────► gliner2 :7100       │
 │               /api/agent ─► model reads broker comments, code applies the policy ────► ollama :11434       │
 │   /metrics (answer-key counters for the SLOs)      :9464 (engine metrics)                                  │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
    ui/ (React + shadcn, static) ◄── browser, through the SSH tunnel on :8080
+
+Push feed (docker compose profile "feed", run on demand by scripts/feed-steps.sh)
+  feed-gen (plays the partners: the same world, one POST per posting, X-Route-Key = lane key)
+     ─► feed-lb   nginx :8091 hash on X-Route-Key (one server line per worker, max_fails=0) · :8090 round robin
+     ─► feed-ingest ×N   cpus: 1 each; normalize ─► dedup ─► match against every search ─► batches of alerts
+     ─► feed-sink        stands in for push/Telegram; scores latency and duplicates against the generator's truth
+  prometheus finds the ingest replicas through Docker DNS (dns_sd_configs)
 
 Telemetry
   code ── OTLP ─► otel-collector :4318 ─┬─ traces ─────► tempo        every trace (Grafana: timelines)
@@ -231,7 +244,7 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 | 14 | **Synthetic data calibrated to real numbers**, with an answer key | Boards forbid scraping; the answer key makes misses and latency measurable exactly | Scraped samples | Results depend on simulator assumptions (`sim/ASSUMPTIONS.md`, `sim/validate.ts`) |
 | 15 | **Benchmarks on a pinned Linux core**, noise floor reported | Laptop noise (±10%) hides 5% effects; pinned: ±1.4% | Laptop runs | Needs a Linux machine (the `dev` server) |
 | 16 | **TypeScript on Node** | One language for engine, simulators and UI; measured fast enough per posting | Go or Rust | One JS thread per process: worker threads and more processes needed sooner |
-| 17 | **Live mode as one container, two threads**: the simulated world (stream, boards, Telegram, answer key) on a worker thread, the engine and API on the main thread | The engine must not share a core with the boards it polls; the answer key must see both sides (loads born, alerts delivered) on one clock | One thread (first version: the boards stole the engine's CPU); separate processes per simulator, like batch mode | Message passing between threads, and the clock anchor copied on every speed change; still one process to restart |
+| 17 | **Live mode as one container, several threads**: the simulated world (stream, boards, Telegram, answer key) on a worker thread, the API on the main thread, the engine on the main thread or on N worker threads (#31) | The engine must not share a core with the boards it polls; the answer key must see both sides (loads born, alerts delivered) on one clock | One thread (first version: the boards stole the engine's CPU); separate processes per simulator, like batch mode | Message passing between threads, and the clock anchor copied on every speed change; still one process to restart |
 | 18 | **Tempo + Loki, not Jaeger**, for traces and logs | Both are Grafana's own backends: one UI for metrics, traces and logs, linked (log → trace by `trace_id`, trace → logs, latency exemplars → trace). Tempo's `local-blocks` processor gives TraceQL rate/error/duration metrics with no separate query engine | Jaeger (own UI, no built-in log link); a hosted trace backend | One more self-hosted service (Loki) to run and keep healthy |
 | 19 | **Pull-based continuous deploy** (cron runs `ops/server/deploy.sh` every minute: fetch, fast-forward, rebuild) over a self-hosted CI runner on this public repo | A self-hosted GitHub Actions runner on a public repo executes any PR's code; cron only ever reads `main` from GitHub, and the server accepts no inbound connections at all | Self-hosted Actions runner; a webhook-triggered deploy (needs an open port) | Up to a minute of deploy lag; no rollback button, just `git revert` and push |
 | 20 | **Adjustable sim clock** (`createAdjustableClock`): speed can change mid-run, re-anchoring sim time to real time | The live UI's speed slider must not make `now()` jump when the user drags it | A fixed-speed clock, restarted to change speed (what batch mode uses) | A little extra bookkeeping (re-anchor on every speed change) instead of a single multiply |
@@ -245,6 +258,9 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 | 28 | **SSE to the browser**, POST for commands | Data flows server → page; SSE is plain HTTP and reconnects by itself | WebSockets (two-way, not needed); polling from the page | No resume after reconnect yet (`Last-Event-ID`); one connection per tab |
 | 29 | **Bounded in-memory queues between stages now, a stream (Kafka/Redpanda) later** | One machine, the bottleneck is CPU and login budgets, not moving data; a stream adds a hop, disk and a service to run | A stream from day one | A restart loses what's in the queues; the switch is planned for when stages span machines (LLD §12) |
 | 30 | **Dashboards, alert rules and data sources as code** (`ops/grafana/`, `ops/prometheus-rules.yml`) | Reviewed in git, deployed with everything else, rebuilt identically on a new server | Clicking them together in the Grafana UI | Edits made in the UI are overwritten on restart |
+| 31 | **Engine workers sharded by dispatcher** (`--engine-workers N`, threads in one process) | A dispatcher's logins, rate limits, "already alerted" memory and chats all live in one worker, so workers share nothing and need no load balancer: the work is polls each worker creates. Measured 1.77× board requests with 2 workers (SLO.md) | Shard by board (a dispatcher's alerts split across workers, which must then coordinate); processes per worker | One process still restarts as a whole; across machines, ownership needs leases (LLD §12) |
+| 32 | **Push feed: nginx hashing on a lane key** (origin state, destination state, pickup date, equipment) | Dedup memory is per worker, so every copy of a load must reach the same worker. Measured: round robin 43% duplicate alerts, hash 2% | Round robin (breaks dedup); a shared dedup store (a network call per posting) | Uneven load if a few lanes are hot; partners don't send our key, so in production an edge tier or Kafka's partition key computes it |
+| 33 | **`max_fails=0` and a 65 s worker keep-alive behind nginx** | nginx's default takes a worker out for 10 s after one failed request and re-hashes its loads elsewhere; Node's 5 s keep-alive caused the failures. Measured 14.5% → 2% duplicates | Defaults; health checks (nginx Plus) | A worker that's really down is not skipped: its share fails until it's back or removed from the list |
 
 ## 5. What breaks first at 1000x (hypotheses the load test will confirm or correct)
 
