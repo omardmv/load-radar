@@ -60,12 +60,11 @@ export async function startEngine(cfg: EngineConfig) {
     pending.add(e.entryId);
     return true;
   } });
-  const rebuildPlans = () => {
-    for (const u of users) {
-      const plan = buildPlan(u, heat.get);
-      for (const c of u.credentials) scheduler.setEntries(c.credentialId, allocate(plan.filter((e) => e.credentialId === c.credentialId), cfg.budgetPerMin));
-    }
+  const planFor = (u: User) => {
+    const plan = buildPlan(u, heat.get);
+    for (const c of u.credentials) scheduler.setEntries(c.credentialId, allocate(plan.filter((e) => e.credentialId === c.credentialId), cfg.budgetPerMin));
   };
+  const rebuildPlans = () => { for (const u of users) planFor(u); };
   rebuildPlans();
 
   const poller = createPoller({ baseUrl: cfg.boardsUrl, connectionsPerBoard: cfg.connectionsPerBoard, clock, timeoutMs: 5_000,
@@ -181,6 +180,12 @@ export async function startEngine(cfg: EngineConfig) {
       const active = new Set(users.flatMap((u) => u.searches.map((x) => x.searchId)));
       const gone = (a: Alert) => !a.searchIds.some((id) => active.has(id));
       return alertQueue.removeWhere(gone) + notifier.removeWhere(gone);
+    },
+    // Some dispatchers changed (cluster mode): rebuild the match index once, and only their polling plans, not everyone's.
+    refreshUsers(userIds: Iterable<string>) {
+      matcher = buildMatcher(users.flatMap((u) => u.searches));
+      const ids = new Set(userIds);
+      for (const u of users) if (ids.has(u.userId)) planFor(u);
     },
     counts: () => ({ ...counts, alertsDropped: alertQueue.dropped() + notifier.droppedStale(), pollsCoalesced: pollStats.coalesced, alertQueue: alertQueue.size(), pollQueue: pollQueue.size(), rawQueue: rawQueue.size(), scheduler: scheduler.stats() }),
     async stop(): Promise<EngineSummary> {

@@ -18,6 +18,7 @@ const { values: a } = parseArgs({ options: { port: { type: 'string', default: '8
   budget: { type: 'string', default: '60' }, 'dedup-model': { type: 'string', default: 'ml/dedup/model.json' } } });
 const worker = hostname();
 const users: User[] = [];
+const byId = new Map<string, User>();                                    // the same dispatchers, by id
 const recent = new Map<string, { at: number; summary: string }[]>();      // last 20 alerts per dispatcher
 const engine = await startEngine({ users, boardsUrl: a.boards!, telegramUrl: a.alerts!, clock: createSimClock({ simStart: Date.now(), speed: 1 }),
   budgetPerMin: Number(a.budget), connectionsPerBoard: 64, metricsPort: Number(a['metrics-port']), otlpEndpoint: null, sampleRate: 0, maxUsers: 0,
@@ -26,9 +27,10 @@ const engine = await startEngine({ users, boardsUrl: a.boards!, telegramUrl: a.a
     for (const x of alerts) { const l = recent.get(x.userId) ?? []; l.unshift({ at, summary: x.summary }); if (l.length > 20) l.pop(); recent.set(x.userId, l); }
   } });
 
-// Saving searches rebuilds the index and every polling plan, so changes are applied at most once a second.
-let dirty = false;
-setInterval(() => { if (dirty) { dirty = false; engine.refreshSearches(); } }, 1_000);
+// Saved changes are applied every 5 s: one rebuild of the match index, and new polling plans only for the dispatchers
+// who changed. A save that changes nothing does no work.
+const changed = new Set<string>();
+setInterval(() => { if (changed.size) { engine.refreshUsers(changed); changed.clear(); } }, 5_000);
 
 const reg = new client.Registry();
 const api = new client.Counter({ name: 'engine_api_requests_total', help: 'dispatcher API requests', labelNames: ['route', 'status'], registers: [reg] });
@@ -41,7 +43,7 @@ const server = createServer((req, res) => {
   if (!m) return json(res, 404, 'other', { error: 'not_found' });
   const id = decodeURIComponent(m[1]);
   if (req.method === 'GET' && m[2]) {
-    if (!users.some((u) => u.userId === id)) return json(res, 404, 'alerts', { error: 'not_owned_here', worker });
+    if (!byId.has(id)) return json(res, 404, 'alerts', { error: 'not_owned_here', worker });
     return json(res, 200, 'alerts', { worker, alerts: recent.get(id) ?? [] });
   }
   if (req.method === 'PUT' && !m[2]) {
@@ -49,9 +51,11 @@ const server = createServer((req, res) => {
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
       const u = JSON.parse(Buffer.concat(chunks).toString()) as User;
-      const i = users.findIndex((x) => x.userId === id);
-      if (i >= 0) users[i].searches = u.searches, users[i].credentials = u.credentials; else users.push({ ...u, userId: id });
-      dirty = true;
+      const own = byId.get(id);
+      if (!own) { const nu = { ...u, userId: id }; users.push(nu); byId.set(id, nu); changed.add(id); }
+      else if (JSON.stringify([own.searches, own.credentials]) !== JSON.stringify([u.searches, u.credentials])) {
+        own.searches = u.searches; own.credentials = u.credentials; changed.add(id);
+      }
       json(res, 200, 'save', { worker, dispatchers: users.length });
     });
     return;
