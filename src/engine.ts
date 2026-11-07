@@ -125,22 +125,29 @@ export async function startEngine(cfg: EngineConfig) {
       else busyLogins.delete(e.credentialId);
     });
   };
+  // Wait for work: no timer at all when the queue already has items; otherwise a 50 ms safety timer that is cleared as
+  // soon as an item arrives (a timer left behind on every pass kept thousands of them pending, ~12% of the CPU).
+  const waitFor = (q: { size(): number; waitForItems(): Promise<void> }, ms: number) => q.size() > 0 ? Promise.resolve()
+    : new Promise<void>((resolve) => { const t = setTimeout(resolve, ms); void q.waitForItems().then(() => { clearTimeout(t); resolve(); }); });
   const pumpPolls = async () => {
     while (running) {
-      await Promise.race([pollQueue.waitForItems(), new Promise((r) => setTimeout(r, 50))]);
+      await waitFor(pollQueue, 50);
+      let started = false;
       while (running && pollQueue.size() && poller.inFlight() < maxInFlight) {
         for (const e of pollQueue.takeBatch(maxInFlight - poller.inFlight()).items) {
+          started = true;
           if (!busyLogins.has(e.credentialId)) { startPoll(e); continue; }
           const w = waitingForLogin.get(e.credentialId);
           if (w) w.push(e); else waitingForLogin.set(e.credentialId, [e]);
         }
       }
-      await new Promise((r) => setTimeout(r, 1));
+      // Yield to I/O. If every request slot is busy and polls are still queued, wait 1 ms instead of spinning.
+      await new Promise((r) => (started || !pollQueue.size() ? setImmediate(r) : setTimeout(r, 1)));
     }
   };
   const pumpProcessing = async () => {
     while (running) {
-      await Promise.race([rawQueue.waitForItems(), new Promise((r) => setTimeout(r, 50))]);
+      await waitFor(rawQueue, 50);
       const { items, waitsMs } = rawQueue.takeBatch(500);
       for (const r of items) processOne(r);
       obs.queueWait('raw', waitsMs);
