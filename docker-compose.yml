@@ -36,11 +36,11 @@ services:
   cluster-world:
     build: { context: ., dockerfile: live/Dockerfile }
     profiles: [cluster]
-    entrypoint: ["node", "cluster/world.ts", "--loads-per-day", "${CLUSTER_LOADS_PER_DAY:-100000}"]
+    entrypoint: ["node", "cluster/world.ts", "--loads-per-day", "${CLUSTER_LOADS_PER_DAY:-100000}", "--board-threads", "${CLUSTER_BOARD_THREADS:-4}"]
   engine:
     build: { context: ., dockerfile: live/Dockerfile }
     profiles: [cluster]
-    entrypoint: ["node", "cluster/engine.ts", "--boards", "http://cluster-world:7001", "--alerts", "http://cluster-world:7002"]
+    entrypoint: ["node", "cluster/engine.ts", "--world", "http://cluster-world:7003", "--alerts", "http://cluster-world:7002"]
     cpus: 1                                  # one core per engine worker, enforced
   engine-lb:
     image: nginx:1.29-alpine

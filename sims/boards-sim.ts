@@ -47,10 +47,21 @@ const firstAfter = (list: SimItem[], since: number) => { let lo = 0, hi = list.l
 export function createBoardsHandler(data: BoardData, opts: { clock: Clock; budgetPerMin: number; banAfterRejects: number; banWindowMs: number }) {
   const creds = new Map<string, { bucket: TokenBucket; rejects: number[]; banned: boolean }>();
   const stats = { ok: 0, rejected: 0, bannedRequests: 0, bannedLogins: 0 };
+  // Every login asks the same question again and again: remember which map cells a query covers (bounded cache).
+  const cellsCache = new Map<string, string[]>();
+  const cellsFor = (lat: number, lon: number, radius: number) => {
+    const k = `${lat}|${lon}|${radius}`;
+    let c = cellsCache.get(k);
+    if (!c) { if (cellsCache.size > 100_000) cellsCache.clear(); c = coverCells(lat, lon, radius, 3); cellsCache.set(k, c); }
+    return c;
+  };
   const handler = (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? '/', 'http://sim');
-    if (url.pathname === '/stats') { json(res, 200, stats); return; }
-    const m = /^\/(dat|truckstop|portal_a|portal_b)\/loads$/.exec(url.pathname);
+    // Parse "/<board>/loads?a=1&b=2" by hand: new URL() per request was a large share of the CPU.
+    const raw = req.url ?? '/';
+    const qi = raw.indexOf('?');
+    const pathname = qi < 0 ? raw : raw.slice(0, qi);
+    if (pathname === '/stats') { json(res, 200, stats); return; }
+    const m = /^\/(dat|truckstop|portal_a|portal_b)\/loads$/.exec(pathname);
     if (!m) { json(res, 404, { error: 'not_found' }); return; }
     const now = opts.clock.now();
     const credId = String(req.headers['x-credential'] ?? '');
@@ -65,18 +76,19 @@ export function createBoardsHandler(data: BoardData, opts: { clock: Clock; budge
       json(res, 429, { error: 'rate_limited' }, { 'retry-after': String(Math.max(1, Math.ceil((c.bucket.nextTokenAt() - now) / 1000))) });
       return;
     }
-    const p = url.searchParams;
-    const lat = Number(p.get('lat')), lon = Number(p.get('lon')), radius = Number(p.get('radius')), since = Number(p.get('since') ?? 0);
-    const equip = new Set((p.get('equipment') ?? '').split(','));
-    const from = p.get('pickup_from') ?? '0000-00-00', to = p.get('pickup_to') ?? '9999-99-99';
+    const p: Record<string, string> = {};
+    if (qi >= 0) for (const kv of raw.slice(qi + 1).split('&')) { const e = kv.indexOf('='); if (e > 0) p[kv.slice(0, e)] = decodeURIComponent(kv.slice(e + 1)); }
+    const lat = Number(p.lat), lon = Number(p.lon), radius = Number(p.radius), since = Number(p.since ?? 0);
+    const equip = (p.equipment ?? '').split(',');
+    const from = p.pickup_from ?? '0000-00-00', to = p.pickup_to ?? '9999-99-99';
     const items: unknown[] = [];
     const byCell = data.get(m[1]);
-    for (const cell of byCell ? coverCells(lat, lon, radius, 3) : []) {
+    for (const cell of byCell ? cellsFor(lat, lon, radius) : []) {
       const list = byCell!.get(cell);
       if (!list) continue;
       for (let i = firstAfter(list, since); i < list.length && list[i].postedAt <= now && items.length < 500; i++) {
         const it = list[i];
-        if (it.coveredAt <= now || !equip.has(it.equip) || it.pickup < from || it.pickup > to) continue;
+        if (it.coveredAt <= now || !equip.includes(it.equip) || it.pickup < from || it.pickup > to) continue;
         if (milesBetween(lat, lon, it.lat, it.lon) > radius) continue;
         items.push(it.raw);
       }

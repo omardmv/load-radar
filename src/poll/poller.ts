@@ -11,9 +11,11 @@ export type PollResult = { status: number; retryAfterSec?: number; items: unknow
 // Requests use undici's low-level request(), not fetch(): fetch builds Request/Response/Headers objects and web
 // streams and needs a timer per request for its timeout; request() takes the timeouts as options. Same HTTP, less CPU.
 export function createPoller(opts: { baseUrl: string; connectionsPerBoard: number; clock: Clock; timeoutMs: number; onResponse(e: PlanEntry, r: PollResult): void }) {
+  // Several board servers (comma-separated): a login always goes to the same one (hash of its id), so its rate limit
+  // lives in one place. One pool per (server, board).
+  const servers = opts.baseUrl.split(',').map((u) => { const b = new URL(u.trim()); return { origin: b.origin, prefix: b.pathname.replace(/\/$/, '') }; });
+  const fnv = (s: string) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
   const pools = new Map<string, { agent: Agent; sem: Semaphore }>();
-  const base = new URL(opts.baseUrl);
-  const origin = base.origin, prefix = base.pathname.replace(/\/$/, '');
   let inFlight = 0;
   // The pickup window changes once a day: format it once a minute, not on every request.
   let windowAt = -Infinity, window = '';
@@ -21,15 +23,19 @@ export function createPoller(opts: { baseUrl: string; connectionsPerBoard: numbe
     if (now - windowAt > 60_000) { windowAt = now; window = `&pickup_from=${centralDate(now)}&pickup_to=${centralDate(now + 7 * 86_400_000)}`; }
     return window;
   };
-  const pool = (board: string) => {
-    let p = pools.get(board);
-    if (!p) { p = { agent: new Agent({ connections: opts.connectionsPerBoard, keepAliveTimeout: 30_000 }), sem: createSemaphore(opts.connectionsPerBoard) }; pools.set(board, p); }
+  const perPool = Math.max(8, Math.ceil(opts.connectionsPerBoard / servers.length));
+  const pool = (server: number, board: string) => {
+    const k = `${server}|${board}`;
+    let p = pools.get(k);
+    if (!p) { p = { agent: new Agent({ connections: perPool, keepAliveTimeout: 30_000 }), sem: createSemaphore(perPool) }; pools.set(k, p); }
     return p;
   };
   return {
     inFlight: () => inFlight,
     async poll(e: PlanEntry): Promise<void> {
-      const { agent, sem } = pool(e.board);
+      const si = servers.length > 1 ? fnv(e.credentialId) % servers.length : 0;
+      const { origin, prefix } = servers[si];
+      const { agent, sem } = pool(si, e.board);
       const t0 = performance.now();
       await sem.acquire();
       const poolWaitMs = performance.now() - t0;

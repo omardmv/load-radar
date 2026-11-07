@@ -4,7 +4,7 @@
 //
 //   PUT /api/dispatchers/:id          save the dispatcher's logins and searches; this worker now owns them
 //   GET /api/dispatchers/:id/alerts   the dispatcher's recent alerts (404 if this worker doesn't own them)
-//   node cluster/engine.ts --boards http://cluster-world:7001 --alerts http://cluster-world:7002
+//   node cluster/engine.ts --world http://cluster-world:7003 --alerts http://cluster-world:7002   (board servers listed by the world)
 import { createServer, type ServerResponse } from 'node:http';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
@@ -14,13 +14,17 @@ import type { Alert, User } from '../src/shared/types.ts';
 import { startEngine } from '../src/engine.ts';
 
 const { values: a } = parseArgs({ options: { port: { type: 'string', default: '8080' }, 'metrics-port': { type: 'string', default: '9464' },
-  boards: { type: 'string', default: 'http://127.0.0.1:7001' }, alerts: { type: 'string', default: 'http://127.0.0.1:7002' },
+  boards: { type: 'string', default: '' }, world: { type: 'string', default: 'http://127.0.0.1:7003' }, alerts: { type: 'string', default: 'http://127.0.0.1:7002' },
   budget: { type: 'string', default: '60' }, 'dedup-model': { type: 'string', default: 'ml/dedup/model.json' } } });
 const worker = hostname();
 const users: User[] = [];
+// Board servers: given, or asked from the world (its board threads), retrying until the world is up.
+const boardsUrl = a.boards || await (async () => {
+  for (;;) { try { return ((await (await fetch(`${a.world}/boards`)).json()) as string[]).join(','); } catch { await new Promise((r) => setTimeout(r, 1_000)); } }
+})();
 const byId = new Map<string, User>();                                    // the same dispatchers, by id
 const recent = new Map<string, { at: number; summary: string }[]>();      // last 20 alerts per dispatcher
-const engine = await startEngine({ users, boardsUrl: a.boards!, telegramUrl: a.alerts!, clock: createSimClock({ simStart: Date.now(), speed: 1 }),
+const engine = await startEngine({ users, boardsUrl, telegramUrl: a.alerts!, clock: createSimClock({ simStart: Date.now(), speed: 1 }),
   budgetPerMin: Number(a.budget), connectionsPerBoard: 64, metricsPort: Number(a['metrics-port']), otlpEndpoint: null, sampleRate: 0, maxUsers: 0,
   bots: 4, botPrefix: `${worker}-`, dedupModel: a['dedup-model'] || null,
   onAlertsSent: (alerts: Alert[], at: number) => {
