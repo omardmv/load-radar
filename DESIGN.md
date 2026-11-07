@@ -115,15 +115,22 @@ flowchart TB
   subgraph SERVER["Linux server: 4 cores, Docker Compose"]
     subgraph LIVE["live container: one Node.js process"]
       MAIN["Main thread<br/>HTTP API + SSE, search parser, agent"]
-      EW["Engine workers ×N (threads)<br/>each owns 1/N of the dispatchers<br/>metrics :9464+i"]
+      EW1["Engine worker 1 (thread)<br/>dispatchers 0, 2, 4, …<br/>their logins, alerts, chats; bots 0–1<br/>metrics :9464"]
+      EW2["Engine worker 2 (thread)<br/>dispatchers 1, 3, 5, …<br/>their logins, alerts, chats; bots 2–3<br/>metrics :9465"]
       WORLD["World thread<br/>simulated boards :7001, Telegram :7002,<br/>answer key"]
-      MAIN <-->|messages| EW
-      EW -->|HTTP polls, alerts| WORLD
+      MAIN <-->|messages| EW1
+      MAIN <-->|messages| EW2
+      EW1 -->|HTTP polls, alerts| WORLD
+      EW2 -->|HTTP polls, alerts| WORLD
     end
     subgraph FEED["Push feed: profile 'feed', started by scripts/feed-steps.sh"]
       GEN["feed-gen<br/>plays the partners"] -->|"POST /loads + X-Route-Key"| LB["feed-lb (nginx)<br/>:8091 hash, :8090 round robin<br/>one server line per worker, max_fails=0"]
-      LB --> ING["feed-ingest ×N<br/>cpus: 1 each"]
-      ING -->|alert batches| SINK["feed-sink<br/>scores latency, duplicates"]
+      LB -->|"hash(lane) → 1"| ING1["Ingest worker 1<br/>container, 1 core<br/>own dedup memory"]
+      LB -->|"hash(lane) → 2"| ING2["Ingest worker 2<br/>container, 1 core<br/>own dedup memory"]
+      LB -->|"hash(lane) → 3"| ING3["Ingest worker 3<br/>container, 1 core<br/>own dedup memory"]
+      ING1 -->|alert batches| SINK["feed-sink<br/>scores latency, duplicates"]
+      ING2 -->|alert batches| SINK
+      ING3 -->|alert batches| SINK
     end
     MODELS["gliner2 :7100 (search parsing)<br/>ollama :11434 (agent)"]
     subgraph OBS["Observability"]
@@ -132,15 +139,20 @@ flowchart TB
       GRAF["Grafana :3000"]
     end
     MAIN --> MODELS
-    EW -. metrics .-> PROM
-    ING -. "metrics (found by Docker DNS)" .-> PROM
+    EW1 -. metrics .-> PROM
+    EW2 -. metrics .-> PROM
+    ING1 -. "metrics (found by Docker DNS)" .-> PROM
+    ING2 -.-> PROM
+    ING3 -.-> PROM
     MAIN -. traces, logs .-> OTEL
     PROM --> GRAF
     OTEL --> GRAF
   end
 ```
 
-The detailed version of the live container, thread by thread, is next.
+Drawn as tested: 2 engine workers (`LIVE_ENGINE_WORKERS=2`) and 3 ingest workers (`--scale feed-ingest=3`). Both
+counts are settings; the default live service runs the engine on the main thread and no push feed. The detailed version
+of the live container, thread by thread, is next.
 
 ### 3.0 Live mode: the same pipeline, running continuously
 
@@ -159,12 +171,14 @@ itself runs as N threads, each owning 1/N of the dispatchers (default 0: the eng
 │     └─► live/score.ts        answer key built as each load is born; scores every delivery                 │
 │              ▲ HTTP, exactly as to real boards                │ messages: stats, postings, your alerts,   │
 │              │                                                ▼ load facts for the agent                  │
-│ ENGINE WORKERS  live/engine-worker.ts ×N  (dispatchers split round robin; each worker owns its share's     │
-│                 logins, rate limits, alerted memory and chats, and 4/N of the Telegram bots: nothing shared)│
+│ ENGINE WORKER 1  live/engine-worker.ts  dispatchers 0, 2, 4, … (split evenly once at startup: dispatcher i │
+│                  → worker i mod N); their logins, rate limits, alerted memory, chats; bots 0–1; metrics :9464│
+│ ENGINE WORKER 2  live/engine-worker.ts  dispatchers 1, 3, 5, …; bots 2–3; metrics :9465. Shares nothing with 1│
+│ each worker runs the whole engine for its own dispatchers:                                                 │
 │   src/engine.ts  scheduler (√ budgets, 1 request in flight per login, duplicate polls coalesced)          │
 │                  ─► pollers ─► normalize ─► dedup (exact id, then logistic-regression classifier)          │
 │                  ─► matcher (geohash index) ─► alert queue ─► notifier (digests; under backlog freshest    │
-│                     first, stale dropped) ─► telegram-sim          metrics :9464, :9465, ... one per worker │
+│                     first, stale dropped) ─► telegram-sim                                                  │
 │ MAIN THREAD  live/server.ts  (runs the engine itself when N = 0)                                           │
 │   HTTP + SSE  /api/state /api/events /api/searches /api/speed /api/rate /api/burst                         │
 │               /api/parse ─► rules; GLiNER2 only if equipment/origin missing ─────────► gliner2 :7100       │
@@ -176,7 +190,10 @@ itself runs as N threads, each owning 1/N of the dispatchers (default 0: the eng
 Push feed (docker compose profile "feed", run on demand by scripts/feed-steps.sh)
   feed-gen (plays the partners: the same world, one POST per posting, X-Route-Key = lane key)
      ─► feed-lb   nginx :8091 hash on X-Route-Key (one server line per worker, max_fails=0) · :8090 round robin
-     ─► feed-ingest ×N   cpus: 1 each; normalize ─► dedup ─► match against every search ─► batches of alerts
+     ├─► ingest worker 1   container, cpus: 1; its own dedup memory; normalize ─► dedup ─► match every search
+     ├─► ingest worker 2   (same)            every copy of one load lands on the same worker: e.g. all copies
+     └─► ingest worker 3   (same)            of IL|GA|2026-11-07|van always go to the same one
+     each worker ─► batches of alerts
      ─► feed-sink        stands in for push/Telegram; scores latency and duplicates against the generator's truth
   prometheus finds the ingest replicas through Docker DNS (dns_sd_configs)
 
