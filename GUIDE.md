@@ -69,7 +69,7 @@ world (Part 4). It has never been connected to real boards.
 | Alert speed | 100% of alerts within 60 s; typical 2.7 s, p99 9.3 s (30 h live, ~290,000 alerts) |
 | Account safety | 0 bans, 0 rate-limit responses in 33 million board requests |
 | Duplicates | 0.03% of alerts |
-| Capacity | 1 engine ~3,000 dispatchers within target; the engine cluster reaches 9,000 on 3 engines |
+| Capacity | The engine cluster serves ~15,000 dispatchers within target on one 4-core server (4 engines) |
 | Dedup classifier | 99.85% precision, 99.4% recall |
 | Search parser | 98% of test searches fully right |
 | Load-decision agent | 88–100% right splitting the job, vs 21–42% letting a model decide everything |
@@ -222,22 +222,23 @@ At real speed, with no overload, completeness runs 96–97%, below the 99% targe
 **What drives load is board requests, not freight:** ~1 request/s per dispatcher (dispatchers × logins), each
 login fetching its own copy of the board.
 
-Measured on one 4-core laptop (100K loads/day ≈ 60% of DAT):
+Measured with the engine cluster on one 4-core server (100K loads/day ≈ 60% of DAT):
 
-| Dispatchers | Alerts ≤ 60 s | Typical alert | Board requests/s | Engine CPU |
+| Engines | Dispatchers | Alerts ≤ 60 s | Board requests/s | Whole machine CPU |
 | --- | --- | --- | --- | --- |
-| 300 | 100% | 2.7 s | 298 | 0.4 cores |
-| **2,000** | **100%** | **3.3 s** | **1,882** | **1.3** |
-| 5,000 | 97.3% | 35 s | 3,318 | 2.0 |
+| 1 | 6,000 | 100% | 6,050 | 2.0 of 8 threads |
+| 3 | 12,000 | 100% | 12,096 | 4.0 |
+| **4** | **15,000** | **100%** | **15,096** | **5.0** |
+| 5 | 18,000 | 98.7% (edge) | 17,972 | 6.7 |
 
-The single JavaScript thread breaks first, not the machine — two cores were still free at 5,000. One thread
-handles ~2,000–3,000 board requests/s within target.
+Each engine is one core and serves ~3,800 board requests/s within target; past ~18,000/s all 8 hardware threads of
+this 4-core server are busy.
 
 **The path up:**
 
 | Step | Status | Rough capacity |
 | --- | --- | --- |
-| **Engine cluster** (engines behind nginx, one machine) | Built, measured | 3 engines: ~6,700 board requests/s, 9,000 dispatchers within the SLO |
+| **Engine cluster** (engines behind nginx, one machine) | Built, measured | 4 engines: ~15,000 board requests/s, 15,000 dispatchers within the SLO |
 | Engines on several machines; handover and crash recovery | Not built | — |
 
 No step puts a database on the hot path. [LLD.md §12](LLD.md) lists the measured triggers for adding a shared

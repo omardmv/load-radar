@@ -42,60 +42,39 @@ requests outnumber new loads ~1,600 to 1.
 
 Open: misses aren't logged with a reason, there's no slow-burn alert, and no health check from outside the box.
 
-### Scale steps at 1×: where it breaks
+### Engine cluster: the maximum on one 4-core server
 
-100K loads/day (~60% of DAT), the world on its own thread, 7 min per step (2 warm-up, 5 measured). Each dispatcher
-has ~1.8 board logins; each login may poll once a second.
+Engine containers behind nginx, one core each; each starts empty and owns whichever dispatchers' requests reach it,
+polling the boards for just those. nginx picks the engine by a consistent hash on the dispatcher id. The simulated
+boards run as 4 threads, each owning a share of the logins. 100K loads/day, 1×, 2 min warm-up, 5 min measured.
+CPU per container from `docker stats`, whole machine from `/proc/stat` (8 hardware threads on 4 physical cores).
 
-| Dispatchers (logins) | Alerts ≤ 60 s | Loads alerted | Post → alert p50 / p95 | Board req/s | CPU (cores) | Engine event-loop p99 |
+| Engines, dispatchers | Board requests/s | Alerts within 60 s | Post → alert p50 / p95 | Engines CPU | Boards CPU | Whole machine |
 | --- | --- | --- | --- | --- | --- | --- |
-| 300 (523) | 100% | 100% | 2.7 / 6.2 s | 298 | 0.41 | 0.13 s |
-| 1,000 (1,799) | 100% | 100% | 3.3 / 11.3 s | 954 | 1.03 | 0.50 s |
-| 2,000 (3,603) | 100% | 100% | 3.3 / 14.8 s | 1,882 | 1.29 | 0.44 s |
-| 5,000 (8,950) | **97.3%** (SLO missed) | 100% | **35 / 59 s** | 3,318 | 1.95 | 0.41 s |
+| 1, 6,000 | 6,050 | 100% | 14 / 28 s | 0.76 | 0.69 | 2.00 |
+| 3, 12,000 | 12,096 | 100% | 7.6 / 18 s | 1.82 | 1.53 | 4.04 |
+| **4, 15,000** | **15,096** | **100%** | 7.6 / 20 s | 2.56 | 1.73 | 4.95 |
+| 5, 18,000 | 17,972 | 98.7% (at the edge) | 15 / 53 s | 3.53 | 2.16 | 6.74 |
+| 4, 18,000 | 18,055 | 85% ✗ (engines full) | 27 / 100 s | 3.32 | 2.06 | 6.29 |
+| 5, 21,000 | 16,976 | 45% ✗ (machine full) | 66 / 199 s | 4.40 | 2.37 | 7.89 |
 
-The knee is between 2,000 and 5,000 dispatchers. Bottleneck: the engine thread's event loop, which runs 0.4–0.5 s
-late from 1,000 dispatchers on — more logins load it, not more freight. One engine thread holds the SLOs to roughly
-2,000–3,000 board requests/s.
+0 429s, 0 bans and 100% of loads alerted in every run.
 
-### Engine cluster
+- **Within the SLO: ~15,000 board requests/s (15,000 dispatchers) with 4 engines; ~18,000/s at the edge with 5.**
+  Past that the whole machine is busy (7.9 of 8 hardware threads) and throughput falls.
+- **Per request:** ~0.17 ms of engine CPU and ~0.11 ms of simulated-board CPU (~0.33 ms for the whole machine).
+  One engine core peaks at ~7,150 board requests/s (overloaded, 1 engine at 9,000 dispatchers).
+- **What keeps the cost per request low:** the engine's HTTP client uses undici's `request()` (not `fetch()`, which
+  builds web objects and a timer per request); the simulated boards parse requests by hand, cache map cells, and run
+  as 4 threads, each owning a share of the logins.
+- Beyond this box, each engine adds ~4,000–7,000 board requests/s of capacity on its own core (with real boards, the
+  board side isn't ours to run).
 
-Engine containers behind nginx; each starts empty and owns whichever dispatchers' requests reach it, polling the
-boards for just those. nginx picks the engine per request by a consistent hash on the dispatcher id. 6,000
-dispatchers, 100K loads/day, 1×, 2 min warm-up, 5 min measured; round robin is the rejected alternative.
-
-| | 1 engine | 2 engines | 3 engines | 3 engines, round robin (rejected) |
-| --- | --- | --- | --- | --- |
-| Board requests/s | 2,989 | **5,590** | **6,052** | 5,618 |
-| CPU per engine | 1.00 | 0.99 | 0.77 | 0.96 |
-| Alerts within 60 s | 85% | 100% | 100% | 86% |
-| Post → alert p50 / p95 | 43 / 100 s | 4.9 / 16 s | 2.9 / 7.5 s | 18 / 220 s |
-| Duplicate alerts | 0 | 0 | 0 | 48% |
-| Misrouted calls (404, wrong engine) | 0 | 0 | 0 | 54% |
-| 429s / bans | 0 / 0 | 0 / 0 | 0 / 0 | 0.34% / 0 |
-
-Maximum with 3 engines: 9,000 dispatchers → 6,728 board requests/s, 100% within 60 s; 12,000 → 6,481/s, 87%
-within 60 s (past the limit).
-
-**CPU at each engine count's maximum** (cores = hardware threads busy; the server has 8 on 4 physical cores).
-Per container from `docker stats`, whole machine from `/proc/stat`, averaged over the 5 measured minutes:
-
-| | 1 engine, 6,000 dispatchers | 2 engines, 6,000 | 3 engines, 9,000 |
-| --- | --- | --- | --- |
-| Board requests/s | 3,071 | 5,841 | 6,856 |
-| Alerts within 60 s | 99.9% | 100% | 100% |
-| Engines | 1.01 | 1.97 | 2.93 |
-| Simulated boards + answer key | 0.48 | 0.77 | **1.01** (its one thread is full) |
-| nginx + dispatcher generator | 0.09 | 0.09 | 0.13 |
-| Everything else (Prometheus, Grafana, models idle) | 0.33 | 0.34 | 0.35 |
-| **Whole machine** | **2.05** | **3.35** | **4.57** |
-
-One engine core handles ~3,000 board requests/s (~0.33 ms of CPU per request). With 3 engines the limit is the
-test rig, not the engines: the simulated boards run on one thread, which is full, and the 4 physical cores are busy.
+Round robin instead of hash (3 engines, 6,000 dispatchers): 48% duplicate alerts, 54% of API calls reached an engine
+that doesn't own the dispatcher (404), 0.34% of board requests answered 429.
 
 Hashing on the dispatcher id keeps everything about a dispatcher on one engine, so duplicates and misrouted calls
-stay at 0. Round robin sends a dispatcher's calls to engines that don't own it: 48% duplicate alerts, 54%
-misrouted. nginx rules: one `server` line per engine, `max_fails=0` (one failed request must not move a
+stay at 0. nginx rules: one `server` line per engine, `max_fails=0` (one failed request must not move a
 dispatcher to another engine), 65 s keep-alive on engines.
 
 ### Overload at 30×, with the overload rules

@@ -30,7 +30,7 @@ requests/s = dispatchers × board logins each × requests per login per second
    × 1000 growth (5 million dispatchers)                                   ≈ 4.7 million/s
 ```
 
-One engine serves ~3,000 board requests/s within the SLOs; three engines behind nginx serve ~6,700/s on this 4-core machine — enough for 9,000 dispatchers (§3.5, SLO.md). 4.7 million/s would need roughly 1,500 engines that way. Moving volume to partner feeds (fetched once for everyone) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
+Four engines behind nginx serve ~15,000 board requests/s within the SLOs on this 4-core machine — 15,000 dispatchers, ~3,800/s per engine (§3.5, SLO.md). 4.7 million/s would need roughly 1,200 engines that way. Moving volume to partner feeds (fetched once for everyone) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
 
 ## 2. Constraints that shape the design
 
@@ -95,7 +95,7 @@ flowchart TB
       LB -->|"hash → owner"| E1["engine 1<br/>container, 1 core"]
       LB -->|"hash → owner"| E2["engine 2<br/>container, 1 core"]
       LB -->|"hash → owner"| E3["engine 3<br/>container, 1 core"]
-      E1 -->|polls, alerts| CWORLD["cluster-world<br/>boards, alert channel, answer key"]
+      E1 -->|polls, alerts| CWORLD["cluster-world<br/>4 board threads, alert channel, answer key"]
       E2 -->|polls, alerts| CWORLD
       E3 -->|polls, alerts| CWORLD
     end
@@ -136,7 +136,7 @@ One container, two threads: the simulated world runs on its own thread/core so t
 ┌─ cluster profile: scripts/cluster-steps.sh, on demand (live stopped meanwhile) ────────────────┐
 │ dispatchers ─► engine-lb (nginx, hash on dispatcher id; one server line per engine, max_fails=0) │
 │   ─► engine 1 / engine 2 / engine 3 (containers, 1 core each; own logins, rate limits, alerted   │
-│      memory) ─► cluster-world (boards :7001, alert channel :7002, dispatcher registration :7003) │
+│      memory) ─► cluster-world (4 board threads :7101-7104, alert channel :7002, registration :7003) │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 Telemetry: OTLP ─► otel-collector ─► tempo (traces) / loki (logs) / langfuse (model calls);
@@ -172,19 +172,20 @@ Polling the gated lane is what explodes at scale; moving volume into the shared 
 
 ### 3.5 Scaling out: the engine cluster (measured, SLO.md)
 
-One engine holds the SLOs to ~3,000 board requests/s. Past that, engine containers (`cluster/engine.ts`) run behind nginx: each starts empty and owns whichever dispatchers' API calls reach it — their logins, rate limits, alerted memory, alerts — polling the boards for only those. nginx picks the engine per request by a consistent hash on the dispatcher id, so one dispatcher's calls always land on the engine that owns it.
+Engine containers (`cluster/engine.ts`) run behind nginx, one core each: each starts empty and owns whichever dispatchers' API calls reach it — their logins, rate limits, alerted memory, alerts — polling the boards for only those. nginx picks the engine per request by a consistent hash on the dispatcher id, so one dispatcher's calls always land on the engine that owns it. The simulated boards run as 4 threads in the world container, each owning a share of the logins (an engine sends a login to its thread by hash of the login id).
 
 **Why hash on dispatcher:** everything about a dispatcher has to live in one place. Round robin sends a dispatcher's calls to engines that don't own it — measured: 48% duplicate alerts, 54% misrouted (404) calls. One `server` line per engine, `max_fails=0` (one failed request must not move a dispatcher elsewhere), 65 s keep-alive.
 
-6,000 dispatchers, 1×:
+Measured on the 4-core server (details: SLO.md):
 
-| | 1 engine | 2 engines | 3 engines |
+| Engines, dispatchers | Board requests/s | Alerts within 60 s | Whole machine CPU |
 | --- | --- | --- | --- |
-| Board requests/s | 2,989 | 5,590 | 6,052 |
-| Alerts within 60 s | 85% | 100% | 100% |
-| Duplicate alerts / misrouted calls | 0 / 0 | 0 / 0 | 0 / 0 |
+| 1, 6,000 | 6,050 | 100% | 2.0 of 8 threads |
+| 3, 12,000 | 12,096 | 100% | 4.0 |
+| **4, 15,000** | **15,096** | **100%** | 5.0 |
+| 5, 18,000 | 17,972 | 98.7% (edge) | 6.7 |
 
-**Maximum with 3 engines:** 9,000 dispatchers → 6,728 board requests/s, 100% within 60 s. The third engine adds less because the 4-core machine is full (3 engines + world + nginx + dispatcher generator); 12,000 dispatchers falls to 87% within 60 s, past the limit.
+The ceiling of this machine is ~15,000 board requests/s within the SLO (~18,000 at the edge); past that all 8 hardware threads are busy. Per request: ~0.17 ms of engine CPU, ~0.11 ms of simulated-board CPU.
 
 ## 4. Decisions, alternatives and trade-offs
 
@@ -210,7 +211,7 @@ The ~10–15 that matter most. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has
 | --- | --- | --- | --- |
 | 1 | **Login budgets** (outside our servers) | Per-login rate limits cap check frequency long before our CPU does | Merge queries better; adaptive intervals; **move volume to shared and partner feeds** |
 | 2 | **Alert delivery** | A hot load matching thousands of users means minutes of queueing at 30 msg/s | Prioritize by load age; digests; several senders; in-app push as the main channel |
-| 3 | **HTTP pools, then one CPU core** | Undersized pools make data stale with no errors; measured: one engine holds all SLOs to ~3,000 dispatchers | Size pools by Little's law; the engine cluster (§3.5), then more machines |
+| 3 | **HTTP pools, then one CPU core** | Undersized pools make data stale with no errors; measured: one engine core peaks at ~7,150 board requests/s; ~3,800/s per engine within the SLO in the cluster | Size pools by Little's law; the engine cluster (§3.5), then more machines |
 | 4 | **In-memory state and GC** | Dedup and alerted sets grow with postings × logins; big heaps mean long GC pauses | Compact entries, drop old buckets, partition across engines and machines |
 | 5 | **Matcher on hot cells** | Chicago or Dallas vans concentrate shared-feed fan-out | Shard by `(cell, equipment)`; dedicated workers for hot cells |
 | 6 | **Login storage** (security, not throughput) | Thousands of customers' board passwords are the most sensitive data in the system | Encryption keys in a KMS, per-tenant isolation, audit logs |
@@ -219,7 +220,7 @@ The ~10–15 that matter most. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has
 
 | Stage | Example size | Runs as | Next limit | Response |
 | --- | --- | --- | --- | --- |
-| Today (measured, SLO.md) | 1 engine within all SLOs to ~3,000 dispatchers; the cluster adds engines behind nginx — 3 engines: 9,000 dispatchers, ~6,700 board requests/s | Engine cluster (containers), world on its own thread | The 4-core machine is full | Engines on separate machines, with handover when engines are added or removed |
+| Today (measured, SLO.md) | 4 engines behind nginx: 15,000 dispatchers, ~15,000 board requests/s within the SLO (~18,000 at the edge with 5) | Engine cluster (containers), simulated boards in 4 threads | The 4-core machine is full (8 of 8 hardware threads) | Engines on separate machines, with handover when engines are added or removed |
 | 10x | ~50,000 customers | + more machines, each running its own engines behind the same hash | One CPU core (JSON parsing) | Threads, then processes |
 | 100x | ~500,000 customers | Several machines, each owning partitions (login / cell / user) | Alert delivery; memory per machine | More senders, push as a second channel; compact state |
 | 1000x | ~5M customers | Many machines, partitions connected by Kafka; snapshots + log replay | Login budgets as a business limit | Shared and partner feeds wherever possible |
