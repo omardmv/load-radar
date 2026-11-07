@@ -37,16 +37,16 @@ Total latency alone can't tell you what to fix. Every alert records five timesta
 
 ```
 posted ──── discovery ────▶ fetched ── processing ──▶ enqueued ── queue wait ──▶ sent ── send ──▶ accepted
-(board)   (waiting for the     (poll        (normalize,      (alert         (waiting for     (notifier   (Telegram
-           next poll)          returned)    dedup, match)    queued)        Telegram tokens)  request)    said 200)
+(board)   (waiting for the     (poll        (normalize,      (alert         (waiting for     (notifier   (channel
+           next poll)          returned)    dedup, match)    queued)        send tokens)     request)    said 200)
 ```
 
 | Part | Expected size | Driven by | If it grows, look at |
 | --- | --- | --- | --- |
 | **Discovery** = fetched − posted | seconds to minutes | **poll interval** for that lane (about half the interval on average) | budget allocation, 429 pauses, HTTP pool wait, scheduler stretch |
 | **Processing** = enqueued − fetched | milliseconds | CPU | event-loop lag, stage queue waits, match fan-out |
-| **Queue wait** = sent − enqueued | ~0, seconds under load | Telegram limits | alert queue age, digest rate, bots |
-| **Send** = accepted − sent | ~100–300 ms | Telegram / network | Telegram latency and 429s |
+| **Queue wait** = sent − enqueued | ~0, seconds under load | alert channel limits | alert queue age, digest rate, bots |
+| **Send** = accepted − sent | ~100–300 ms | alert channel / network | channel latency and 429s |
 
 **Expect discovery to dominate**, because polling every 5–60 seconds dwarfs milliseconds of processing. That's the design's main lever: the budget allocation rule (LLD 6.3) exists to shrink discovery where it matters. The dashboard shows the four parts stacked, per lane heat, so the biggest part is obvious.
 
@@ -73,7 +73,7 @@ stage_queue_wait_seconds{stage}          time an item waits before the stage pic
 | HTTP pool per board | `http_sockets_in_use{board}` / pool size | **`http_pool_wait_seconds{board}`** | `upstream_requests_total{status="timeout"}` |
 | Login budgets | `budget_used_ratio{board}` (across logins) | `scheduler_stretch_factor`, entries waiting for tokens | `upstream_requests_total{status="429"}`, pauses, bans |
 | Stage queues | `stage_queue_depth / capacity` | `stage_queue_wait_seconds` | `stage_queue_full_total` (producer had to wait) |
-| Telegram | `telegram_sent_total` / 30 per bot per s | `alert_queue_oldest_seconds` | `telegram_429_total` |
+| Alert channel | `alerts_sent_total` / 30 per sender per s | `alert_queue_oldest_seconds` | `alerts_429_total` |
 | Disk (snapshots) | `snapshot_bytes` | `snapshot_duration_seconds` vs the 5 s interval | `snapshot_failures_total` |
 
 **Saturation comes before failure.** Pool wait, event-loop lag and queue age rise before latency SLOs break, so they're where alerts and load-test analysis look first.
@@ -103,7 +103,7 @@ Prometheus histograms need bucket boundaries chosen up front; they're listed her
 | `alert_queue_depth`, `alert_queue_oldest_seconds` | gauge | — | |
 | `alert_queue_mode` | gauge | — | 0 = oldest first, 1 = freshest first |
 | `alerts_dropped_stale_total` | counter | — | |
-| `telegram_sent_total`, `telegram_429_total`, `telegram_digest_size` | counter / histogram | — | |
+| `alerts_sent_total`, `alerts_429_total`, `alert_digest_size` | counter / histogram | — | |
 | stage RED + USE metrics | | | section 4 |
 | `llm_calls_total`, `llm_latency_seconds`, `llm_tokens_total`, `llm_cost_usd_total` | | `result`, `kind` | parser only |
 | `build_info` | gauge | `git_sha`, `config_hash` | lets every graph be tied to a version and config |
@@ -219,7 +219,7 @@ Each run follows the same steps, so results are comparable:
 | --- | --- |
 | Baseline | SLOs pass; the latency breakdown is mostly discovery |
 | Users step-up | The knee and its saturated resource |
-| Hot-lane burst (`--burst`) | Match fan-out and Telegram queueing; queue switches to freshest first |
+| Hot-lane burst (`--burst`) | Match fan-out and alert queueing; queue switches to freshest first |
 | Board slow / 429s | Backoff works; other boards unaffected; zero bans |
 | **Undersized HTTP pool (64 sockets)** | Pool wait rises while board latency stays flat: the silent limit made visible |
 | Kill and restart | Misses and duplicates caused by the restart (snapshot interval) |
@@ -256,7 +256,7 @@ This is deliberately smaller than the full design below: it's the dashboard that
 - **Row 2, where time goes:** the four latency parts, stacked, by lane heat.
 - **Row 3, sources:** requests by board and status; pool wait vs board response time on the same graph (the pool signature); budget used; paused logins; freshness.
 - **Row 4, engine:** RED per stage; queue depth and wait per stage; event-loop lag; heap and GC pauses.
-- **Row 5, delivery:** alert queue depth and oldest age; queue mode; stale drops; Telegram sends, 429s, digest sizes.
+- **Row 5, delivery:** alert queue depth and oldest age; queue mode; stale drops; alert sends, 429s, digest sizes.
 
 **2. Load test** — the same panels, with annotations at each load step and run boundary, plus the `build_info` version. No formal step-load harness exists yet to produce these runs (DESIGN.md §7); the built dashboard's "Right now" row is what stands in for it today.
 
@@ -288,7 +288,7 @@ These are recording + alerting rules evaluated by Prometheus itself (`rule_files
 | Delivery falling behind | `alert_queue_oldest_seconds` > 30 s for 5 min | page |
 | Board format changed | `normalize_unknown_total` rate > 5× its weekly baseline | ticket |
 | Snapshots failing | `snapshot_failures_total` increases, or snapshot age > 30 s | ticket (moot until section 7 of LLD.md's snapshotting is built) |
-| Telegram throttling | `telegram_429_total` rate > 1/s for 10 min | ticket |
+| Alert channel throttling | `alerts_429_total` rate > 1/s for 10 min | ticket |
 
 Each alert links to a runbook (section 12) and to the relevant dashboard row.
 
@@ -299,7 +299,7 @@ Each alert links to a runbook (section 12) and to the relevant dashboard row.
 | Latency up, **discovery** part grew | Budget used, 429s, scheduler stretch | Budgets exhausted or logins paused | Better query merging; reallocate budget to hot lanes; shared feeds |
 | Latency up, board response time flat, **pool wait** up | Pool panel | HTTP pool too small | Resize by Little's law |
 | Latency up, **processing** part grew | Event-loop lag, stage queue waits, CPU profile | One core saturated | Profile; worker threads by `credentialId` |
-| Latency up, **queue wait** part grew | Alert queue age, Telegram 429s | Delivery limit (hot load) | Digests, more bots, push channel |
+| Latency up, **queue wait** part grew | Alert queue age, alert channel 429s | Delivery limit (hot load) | Digests, more senders, a second channel |
 | Misses up, latency fine | Scorer misses by reason; dedup merges; unknown places | Classifier over-merging or adapter dropping postings | Raise the merge threshold; fix the adapter |
 | Duplicates up | `dedup_total{result="new"}` share; restart events | Classifier under-merging, or a restart lost the alerted set | Lower the threshold; check snapshots |
 | 429s rising on one board | Logs: top logins by 429s | Budget assumption wrong for that board | Lower that board's budget |

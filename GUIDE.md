@@ -43,7 +43,7 @@ for it:
    **bans the account**. A banned login is a customer who can't work. That's the worst thing the system can do.
 3. **The same load appears many times:** refreshed, re-posted with a new id, copied to other boards, re-posted by a
    second broker at a lower rate. About half of all board rows are duplicates. The dispatcher wants **one** alert.
-4. **One load can match thousands of saved searches,** and Telegram allows only about 30 messages a second per bot.
+4. **One load can match thousands of saved searches,** and the alert channel delivers only about 30 messages a second per sender.
 
 So the work is in **polling politely, recognizing duplicates and fanning out alerts**, not in the freight.
 
@@ -88,7 +88,7 @@ fast and cheap). Creating a search is the *cold path*: rare, so accuracy matters
       │
       ▼
  Normalizer ──▶ Dedup ──▶ Matcher ──▶ Alert queue ──▶ Notifier ──▶ Dispatcher's phone
- (4 formats     (seen this   (which searches   (order under    (Telegram's
+ (4 formats     (seen this   (which searches   (order under    (the alert
   → 1 format)    load before?) want this load?)  overload)       rate limits)
 ```
 
@@ -134,7 +134,7 @@ load found with customer A's login may only alert customer A.
 ### 3.7 Alert queue and notifier
 One alert per (user, load), even if two searches match. Normally oldest first, which keeps the worst wait short. When
 delivery falls behind, **freshest first**, since old loads are probably taken; alerts older than 10 minutes are
-dropped and counted. The notifier respects Telegram's limits (~30 messages/s per bot, ~1/s per chat) and merges
+dropped and counted. The notifier respects the alert channel's limits (~30 messages/s per sender, ~1/s per dispatcher) and merges
 several pending alerts for one chat into a digest.
 
 ### 3.8 One posting's journey
@@ -161,7 +161,7 @@ truth.
   their sources; every number is listed with its source in [sim/ASSUMPTIONS.md](sim/ASSUMPTIONS.md).
 - **Four simulated boards** (`sims/boards-sim.ts`) with four different formats, per-login request budgets, 429s with
   `Retry-After`, bans after repeated abuse, and loads that disappear when taken (~20 min after posting).
-- **A simulated Telegram** (`sims/telegram-sim.ts`) with the real rate limits.
+- **A simulated web alert channel** (`sims/telegram-sim.ts`) with delivery limits per sender and per dispatcher.
 - **300 synthetic dispatchers** with ~1,100 saved searches and their own board logins, plus you in the UI.
 - **The answer key.** When a load is born, the world already knows who *should* hear about it: every search that
   matches it, on a board that user has a login for. Every delivered alert is checked against that: on time, late,
@@ -188,7 +188,7 @@ dispatchers; by default it runs on the main thread.
 │ WORLD THREAD (live/world-worker.ts)          "the outside world"                           │
 │   sim/world.ts → live/stream.ts   endless loads and their postings, released on time       │
 │     ├─ boards-sim   :7001   budgets, 429s, bans, loads taken after ~20 min                 │
-│     ├─ telegram-sim :7002   30 msg/s per bot, 1 msg/s per chat                             │
+│     ├─ alert channel :7002  30 msg/s per sender, 1 msg/s per dispatcher                    │
 │     └─ live/score.ts        the answer key, scoring every delivery                         │
 │            ▲ HTTP, exactly as to real boards                                               │
 │ ENGINE WORKERS (live/engine-worker.ts) ×N, each owning 1/N of the dispatchers              │
@@ -226,7 +226,7 @@ self-hosted Langfuse (with its Postgres, ClickHouse, Redis and MinIO).
 
 ```
 src/        the engine: plan/ schedule/ poll/ normalize/ dedup/ match/ alerts/ parse/ agent/ obs/, engine.ts wires them
-sim/        the world model and batch generator          sims/   simulated boards and Telegram
+sim/        the world model and batch generator          sims/   simulated boards and alert channel
 live/       always-on server, stream, live answer key    ui/     React + shadcn frontend
 scorer/     batch answer-key scorer                       ml/     training, evals and results for every model
 ops/        deploy script, Prometheus/Grafana/Tempo/collector config, Mac tunnel   bench/  observability cost test
@@ -355,7 +355,7 @@ lost at the knee (completeness, 429s and bans held); alerts just got slower.
 | **Shard the engine** (built for one machine, measured) | N workers, each owning a share of the dispatchers; across machines, leases in Redis so a dead worker's logins move. Logins are independent, so this splits cleanly; each login's rate limiter stays local | Measured 1.77× with 2 workers on 4 cores (SLO.md); roughly linear in cores: 16 cores ≈ 35,000–45,000 |
 | Many machines | Stateless workers on Kubernetes/Nomad, autoscaled on event-loop lag; many outbound IPs | ~2,500 req/s per worker → 500,000 req/s ≈ 200 workers ≈ 15 × 16-core machines |
 | Partition the data | Postings into Kafka/Redpanda keyed by origin geohash; dedup and matching partitioned by the same key, so candidates are always local | Removes cross-shard lookups |
-| Alerts | Own service, many bots, push/SMS as main channels (Telegram's ~30 msg/s/bot caps delivery long before polling does) | — |
+| Alerts | Own service, many senders, mobile push/SMS next to web (~30 msg/s per sender caps delivery long before polling does) | — |
 | **Fewer requests** | Poll each area once and fan out to every matching search (if board terms allow), adaptive intervals; **partner/shared feeds** instead of per-login polling | Plausibly 5–10× fewer requests; the biggest lever at 1000×, and a business fix more than a technical one |
 
 At no step does a central database sit on the hot path. [LLD.md §12](LLD.md) lists the measured triggers for adding a

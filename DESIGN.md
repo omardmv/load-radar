@@ -57,7 +57,7 @@ At 2,000 dispatchers and 100K loads/day, board requests outnumber new loads abou
 | One login per person; no sharing, no scraping tools | [DAT](https://www.dat.com/blog/why-dat-doesnt-allow-login-sharing-or-data-scraping-extensions): "Each DAT login is for one person." Board tools in this market connect each customer's own account | A result fetched with customer A's login can **only alert customer A**. No cross-customer cache for gated boards |
 | Different customers see different loads | Broker portals only show loads to approved carriers | Every posting carries **who is allowed to see it** |
 | Each login has a request budget; abuse gets it banned | Board behavior (simulated) | The scheduler spends a per-login budget. A ban is the worst outcome |
-| Telegram: ~30 msg/s per bot, ~1 msg/s per chat | [Telegram Bot FAQ](https://core.telegram.org/bots/faq) | 5,000 alerts for one hot load take ~170 s from one bot. Delivery is a bottleneck |
+| Alerts go to dispatchers on the web, through a channel with limits: ~30 msg/s per sender, ~1 msg/s per dispatcher | Simulated, set like typical messaging APIs | 5,000 alerts for one hot load take ~170 s from one sender. Delivery is a bottleneck |
 | ~52% of board rows are duplicates; loads are cross-posted, re-posted and co-brokered; 30% have no rate | Measured on a public board, built into the simulator (`sim/ASSUMPTIONS.md`) | Two-stage dedup; an explicit policy for loads with no rate |
 | LLMs are slow (~1 s) and cost money | General | No LLM per posting. LLMs only when a search is created |
 
@@ -115,16 +115,16 @@ flowchart TB
   subgraph SERVER["Linux server: 4 cores, Docker Compose"]
     subgraph LIVE["live container: one Node.js process"]
       MAIN["Main thread<br/>HTTP API + SSE, search parser, agent"]
-      EW1["Engine worker 1 (thread)<br/>dispatchers 0, 2, 4, …<br/>their logins, alerts, chats; bots 0–1<br/>metrics :9464"]
-      EW2["Engine worker 2 (thread)<br/>dispatchers 1, 3, 5, …<br/>their logins, alerts, chats; bots 2–3<br/>metrics :9465"]
-      WORLD["World thread<br/>simulated boards :7001, Telegram :7002,<br/>answer key"]
+      EW1["Engine worker 1 (thread)<br/>dispatchers 0, 2, 4, …<br/>their logins, alerts; senders 0–1<br/>metrics :9464"]
+      EW2["Engine worker 2 (thread)<br/>dispatchers 1, 3, 5, …<br/>their logins, alerts; senders 2–3<br/>metrics :9465"]
+      WORLD["World thread<br/>simulated boards :7001, alert channel :7002,<br/>answer key"]
       MAIN <-->|messages| EW1
       MAIN <-->|messages| EW2
       EW1 -->|HTTP polls, alerts| WORLD
       EW2 -->|HTTP polls, alerts| WORLD
     end
     subgraph FEED["Push feed: profile 'feed', started by scripts/feed-steps.sh"]
-      GEN["feed-gen<br/>plays the partners"] -->|"POST /loads + X-Route-Key"| LB["feed-lb (nginx)<br/>:8091 hash, :8090 round robin<br/>one server line per worker, max_fails=0"]
+      GEN["feed-gen<br/>plays the partners"] -->|"POST /loads + X-Route-Key"| LB["feed-lb (nginx)<br/>:8091 hash: the route in use<br/>:8090 round robin: test comparison only<br/>one server line per worker, max_fails=0"]
       LB -->|"hash(lane) → 1"| ING1["Ingest worker 1<br/>container, 1 core<br/>own dedup memory"]
       LB -->|"hash(lane) → 2"| ING2["Ingest worker 2<br/>container, 1 core<br/>own dedup memory"]
       LB -->|"hash(lane) → 3"| ING3["Ingest worker 3<br/>container, 1 core<br/>own dedup memory"]
@@ -167,18 +167,18 @@ itself runs as N threads, each owning 1/N of the dispatchers (default 0: the eng
 │   sim/world.ts ─► live/stream.ts   new loads forever (Poisson, US Central hour of day); every refresh,      │
 │                                    repost, cross-post and co-broker copy scheduled and released on time   │
 │     ├─► boards-sim    :7001  per-login budgets, 429 + Retry-After, bans, loads covered after ~20 min      │
-│     ├─► telegram-sim  :7002  30 msg/s per bot, 1 msg/s per chat                                           │
+│     ├─► alert channel :7002  web alerts: 30 msg/s per sender, 1 msg/s per dispatcher (sims/telegram-sim.ts) │
 │     └─► live/score.ts        answer key built as each load is born; scores every delivery                 │
 │              ▲ HTTP, exactly as to real boards                │ messages: stats, postings, your alerts,   │
 │              │                                                ▼ load facts for the agent                  │
 │ ENGINE WORKER 1  live/engine-worker.ts  dispatchers 0, 2, 4, … (split evenly once at startup: dispatcher i │
-│                  → worker i mod N); their logins, rate limits, alerted memory, chats; bots 0–1; metrics :9464│
-│ ENGINE WORKER 2  live/engine-worker.ts  dispatchers 1, 3, 5, …; bots 2–3; metrics :9465. Shares nothing with 1│
+│                  → worker i mod N); their logins, rate limits, alerted memory; senders 0–1; metrics :9464  │
+│ ENGINE WORKER 2  live/engine-worker.ts  dispatchers 1, 3, 5, …; senders 2–3; metrics :9465. Shares nothing with 1│
 │ each worker runs the whole engine for its own dispatchers:                                                 │
 │   src/engine.ts  scheduler (√ budgets, 1 request in flight per login, duplicate polls coalesced)          │
 │                  ─► pollers ─► normalize ─► dedup (exact id, then logistic-regression classifier)          │
 │                  ─► matcher (geohash index) ─► alert queue ─► notifier (digests; under backlog freshest    │
-│                     first, stale dropped) ─► telegram-sim                                                  │
+│                     first, stale dropped) ─► alert channel                                                 │
 │ MAIN THREAD  live/server.ts  (runs the engine itself when N = 0)                                           │
 │   HTTP + SSE  /api/state /api/events /api/searches /api/speed /api/rate /api/burst                         │
 │               /api/parse ─► rules; GLiNER2 only if equipment/origin missing ─────────► gliner2 :7100       │
@@ -189,12 +189,12 @@ itself runs as N threads, each owning 1/N of the dispatchers (default 0: the eng
 
 Push feed (docker compose profile "feed", run on demand by scripts/feed-steps.sh)
   feed-gen (plays the partners: the same world, one POST per posting, X-Route-Key = lane key)
-     ─► feed-lb   nginx :8091 hash on X-Route-Key (one server line per worker, max_fails=0) · :8090 round robin
+     ─► feed-lb   nginx :8091 hash on X-Route-Key (one server line per worker, max_fails=0) · :8090 round robin (only to measure against: 43% duplicates)
      ├─► ingest worker 1   container, cpus: 1; its own dedup memory; normalize ─► dedup ─► match every search
      ├─► ingest worker 2   (same)            every copy of one load lands on the same worker: e.g. all copies
      └─► ingest worker 3   (same)            of IL|GA|2026-11-07|van always go to the same one
      each worker ─► batches of alerts
-     ─► feed-sink        stands in for push/Telegram; scores latency and duplicates against the generator's truth
+     ─► feed-sink        stands in for web alerts; scores latency and duplicates against the generator's truth
   prometheus finds the ingest replicas through Docker DNS (dns_sd_configs)
 
 Telemetry
@@ -260,7 +260,7 @@ Polling the gated lane is what explodes at scale. **Moving volume into the share
 
 **Alert queue.** While delivery keeps up, oldest first, which minimizes the worst-case latency. When it falls behind, freshest first, because older loads are probably taken already. An alert older than its deadline (~10 min) is dropped and counted. An idempotency key `(user, load)` makes sure retries and duplicate postings never alert twice.
 
-**Notifier.** Token buckets enforce ~30 msg/s per bot and ~1 msg/s per chat. When one chat has several pending alerts, they're merged into one digest. It supports several bots and channels (in-app push, Telegram, email).
+**Notifier.** Token buckets enforce ~30 msg/s per sender and ~1 msg/s per dispatcher. When one dispatcher has several pending alerts, they're merged into one digest. Alerts go to the web app (in-app); push and email are possible extra channels.
 
 ### 3.4 One posting's journey
 
@@ -271,13 +271,13 @@ Polling the gated lane is what explodes at scale. **Moving volume into the share
 > 3. **Dedup:** the board id is new. The classifier finds no earlier posting of this load, so it's new.
 > 4. **Matcher:** cell `dp3w` + van + today gives 3 candidate searches from customer #318. Two pass the deadhead and rate filters.
 > 5. **Queue:** one alert for customer #318 (the key is per user per load, so two matching searches still mean one alert).
-> 6. **9:02:16:** the notifier sends it to Telegram. **Post-to-alert: 6 seconds.**
+> 6. **9:02:16:** the notifier sends it to the dispatcher's web app. **Post-to-alert: 6 seconds.**
 > 7. **9:03:40:** the same broker cross-posts on Truckstop at $1,975. Customer #318's Truckstop query finds it. The classifier says same load, so no second alert.
 
 ### 3.5 Scaling out: engine workers and the push feed (measured, SLO.md)
 
 **Polling lane: shard by dispatcher.** `--engine-workers N` runs the engine as N threads, each owning 1/N of the
-dispatchers with their logins, rate limits, "already alerted" memory and Telegram chats. Nothing is shared, so no
+dispatchers with their logins, rate limits, "already alerted" memory and alert delivery. Nothing is shared, so no
 load balancer is needed: the work is polls the worker creates itself. Measured: a second worker gives 1.77x the board
 requests on the same load (3,745 -> 6,617/s on the 4-core server).
 
@@ -310,7 +310,7 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 | 14 | **Synthetic data calibrated to real numbers**, with an answer key | Boards forbid scraping; the answer key makes misses and latency measurable exactly | Scraped samples | Results depend on simulator assumptions (`sim/ASSUMPTIONS.md`, `sim/validate.ts`) |
 | 15 | **Benchmarks on a pinned Linux core**, noise floor reported | Laptop noise (±10%) hides 5% effects; pinned: ±1.4% | Laptop runs | Needs a Linux machine (the `dev` server) |
 | 16 | **TypeScript on Node** | One language for engine, simulators and UI; measured fast enough per posting | Go or Rust | One JS thread per process: worker threads and more processes needed sooner |
-| 17 | **Live mode as one container, several threads**: the simulated world (stream, boards, Telegram, answer key) on a worker thread, the API on the main thread, the engine on the main thread or on N worker threads (#31) | The engine must not share a core with the boards it polls; the answer key must see both sides (loads born, alerts delivered) on one clock | One thread (first version: the boards stole the engine's CPU); separate processes per simulator, like batch mode | Message passing between threads, and the clock anchor copied on every speed change; still one process to restart |
+| 17 | **Live mode as one container, several threads**: the simulated world (stream, boards, alert channel, answer key) on a worker thread, the API on the main thread, the engine on the main thread or on N worker threads (#31) | The engine must not share a core with the boards it polls; the answer key must see both sides (loads born, alerts delivered) on one clock | One thread (first version: the boards stole the engine's CPU); separate processes per simulator, like batch mode | Message passing between threads, and the clock anchor copied on every speed change; still one process to restart |
 | 18 | **Tempo + Loki, not Jaeger**, for traces and logs | Both are Grafana's own backends: one UI for metrics, traces and logs, linked (log → trace by `trace_id`, trace → logs, latency exemplars → trace). Tempo's `local-blocks` processor gives TraceQL rate/error/duration metrics with no separate query engine | Jaeger (own UI, no built-in log link); a hosted trace backend | One more self-hosted service (Loki) to run and keep healthy |
 | 19 | **Pull-based continuous deploy** (cron runs `ops/server/deploy.sh` every minute: fetch, fast-forward, rebuild) over a self-hosted CI runner on this public repo | A self-hosted GitHub Actions runner on a public repo executes any PR's code; cron only ever reads `main` from GitHub, and the server accepts no inbound connections at all | Self-hosted Actions runner; a webhook-triggered deploy (needs an open port) | Up to a minute of deploy lag; no rollback button, just `git revert` and push |
 | 20 | **Adjustable sim clock** (`createAdjustableClock`): speed can change mid-run, re-anchoring sim time to real time | The live UI's speed slider must not make `now()` jump when the user drags it | A fixed-speed clock, restarted to change speed (what batch mode uses) | A little extra bookkeeping (re-anchor on every speed change) instead of a single multiply |
@@ -346,7 +346,7 @@ Each row is a choice we made, what we compared it against, and what it costs us.
 | --- | --- | --- | --- | --- |
 | Today (measured, SLO.md) | 2,000 dispatchers (3,600 logins) within all SLOs on one engine thread; the speed SLO breaks at 5,000. With 2 engine workers: 1.77x the board requests (6,617/s) | Engine workers (threads), each owning a share of the dispatchers; the simulated world on its own thread | The 4-core machine (the simulator shares it) | Workers on more machines, with leases for login ownership |
 | 10x | ~50,000 customers | + worker threads partitioned by login | One CPU core (JSON parsing of responses) | Threads, then processes |
-| 100x | ~500,000 customers | Several machines, each owning partitions (login / cell / user) | Telegram delivery; memory per machine | Push as main channel, more bots; compact state |
+| 100x | ~500,000 customers | Several machines, each owning partitions (login / cell / user) | Alert delivery; memory per machine | More senders, push as a second channel; compact state |
 | 1000x | ~5M customers | Many machines, partitions connected by Kafka; snapshots + log replay | Login budgets as a business limit | Shared and partner feeds wherever possible |
 
 No central store sits on the hot path at any stage; LLD section 12 lists the measured triggers for adding one.
@@ -382,7 +382,7 @@ Summary:
 
 | SLI | Target |
 | --- | --- |
-| Alerts are fast | 99% of alerts reach Telegram within 60 s (simulated) of the load being posted |
+| Alerts are fast | 99% of alerts reach the dispatcher within 60 s (simulated) of the load being posted |
 | Alerts are complete | 99% of matching loads that stay on the board 5+ minutes get an alert |
 | Boards stay friendly | 0 banned logins; under 1% of board requests answered 429 |
 
@@ -406,7 +406,7 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 - [x] Data generator + validation
 - [x] Engine core for the benchmark (normalize, dedup with a simple rule, matcher, alerts) + observability overhead test
 - [x] `docker compose`: OTel Collector, Tempo, Loki, Prometheus, Grafana, GLiNER2, Ollama, Langfuse (self-hosted); runs continuously on the dev server, deployed by cron (DEPLOY.md), not just started locally
-- [x] Board simulator (budgets, 429s, bans, covered loads) and Telegram simulator
+- [x] Board simulator (budgets, 429s, bans, covered loads) and alert channel simulator
 - [x] Scheduler + pollers, normalizer, dedup (rule on Day 1; trained classifier since Day 2), matcher, alert queue, notifier
 - [x] Observability on every stage (lite metrics, own 1% sampling, 1 span per posting) and an end-to-end scored run (README "History: the first end-to-end run")
 
@@ -438,4 +438,4 @@ Each run records the first SLO to fail and what saturated at that moment: HTTP p
 - Is a product like this bound by polling on customer logins, or can it get push feeds from boards and brokers?
 - What post-to-alert latency do dispatchers actually need, and how often do real systems miss matches?
 - What do board partnerships allow that a normal login doesn't (higher limits, shared feeds)?
-- Which channel do dispatchers act on fastest: push, Telegram or SMS?
+- Which channel do dispatchers act on fastest: web, mobile push or SMS?

@@ -7,7 +7,7 @@ What "working" means for Load Radar, in numbers a dispatcher would care about. E
 
 | # | SLO | Target | SLI (how it's measured) | Why this number |
 | --- | --- | --- | --- | --- |
-| 1 | **Alerts are fast** | 99% of alerts reach Telegram within **60 s** of the load being posted | `post_to_alert_seconds` histogram (engine): alerts with `le="60"` ÷ all alerts | A good load is covered in ~20 min (median, `sims/cover.ts`), and the first caller usually wins. A minute is still early; 10 minutes is too late to matter. At 1× the live run measures p99 ≈ 10 s, so this leaves room. |
+| 1 | **Alerts are fast** | 99% of alerts reach the dispatcher (web alert channel) within **60 s** of the load being posted | `post_to_alert_seconds` histogram (engine): alerts with `le="60"` ÷ all alerts | A good load is covered in ~20 min (median, `sims/cover.ts`), and the first caller usually wins. A minute is still early; 10 minutes is too late to matter. At 1× the live run measures p99 ≈ 10 s, so this leaves room. |
 | 2 | **Alerts are complete** | 99% of matching loads that stay on the board **5+ minutes** get an alert | live answer key (`live/score.ts`): `answer_key_settled_total{outcome="delivered"}` ÷ (`delivered` + `missed_open`) | A load taken within a couple of minutes may be gone before any poll could see it; those are counted (`missed_quick`) but don't burn the budget. A missed load that sat on the board 5+ minutes is our fault. |
 | 3 | **Boards stay friendly** | **0** banned logins; under **1%** of board requests answered 429 | `engine_gauge{name="logins_banned"}`; `upstream_requests_total` by status | A banned login is a customer who can't use our product until the board reinstates them. That's an incident, not a budget. 429s are the board telling us to slow down; a few are normal, many mean the scheduler is wrong. |
 
@@ -61,7 +61,7 @@ older than 10 min dropped, digests of 20 instead of 5.
 | Post → alert p50 | minutes | **29 s** |
 | Loads alerted, open 5+ min (99%) | 92.3% | **87.9%** (worse) |
 | Board 429s / banned logins | 0 / 0 | 0 / 0 |
-| Alert backlog (held for Telegram) | growing | 0 |
+| Alert backlog (held for the alert channel) | growing | 0 |
 | Board requests | not recorded | 2,630/s |
 | Engine CPU / event-loop p99 | not recorded | 1.23 cores / 44 ms |
 | Polls coalesced | (no such rule) | 1.76 M in 5 min |
@@ -99,7 +99,7 @@ Each dispatcher has ~1.8 board logins; each login may poll once a second.
 
 `--engine-workers N` splits the engine into N threads, each owning 1/N of the dispatchers (their logins, alerts and
 chats), so the shards share nothing. Same world for both runs: 8,000 dispatchers (more than one thread can serve),
-100K loads/day, 1x, 2 min warm-up, 5 min measured (`scripts/core-steps.sh`). The 4 Telegram bots are split between
+100K loads/day, 1x, 2 min warm-up, 5 min measured (`scripts/core-steps.sh`). The 4 alert senders are split between
 the workers, so delivery capacity is the same in both runs.
 
 | | 1 worker | 2 workers | 2 workers, 12,000 dispatchers |

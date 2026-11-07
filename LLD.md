@@ -22,11 +22,11 @@ So the order is:
 
 | Process | What runs inside | Talks to |
 | --- | --- | --- |
-| `engine` | api, planner, scheduler, pollers, normalizer, dedup, matcher, alert queue, notifier, as modules connected by in-memory queues | boards-sim and telegram-sim over HTTP; searches and credentials from a flat file (batch) or passed in by the caller (live mode); no snapshot file yet (section 7 is the design, not built) |
+| `engine` | api, planner, scheduler, pollers, normalizer, dedup, matcher, alert queue, notifier, as modules connected by in-memory queues | boards-sim and the alert channel sim over HTTP; searches and credentials from a flat file (batch) or passed in by the caller (live mode); no snapshot file yet (section 7 is the design, not built) |
 | `boards-sim` | replays `out/postings.ndjson` with budgets, 429s, bans, covered loads | — |
-| `telegram-sim` | enforces Telegram rate limits, logs deliveries | — |
+| alert channel sim (`sims/telegram-sim.ts`) | the web alert channel: enforces delivery limits per sender and per dispatcher, logs deliveries | — |
 | `scorer` | offline, compares deliveries with the answer key | files |
-| `live` | one always-on process, 2 + N threads. **World thread** (`live/world-worker.ts`): `sim/world.ts` as a stream, boards-sim and telegram-sim on 127.0.0.1:7001/7002, the rolling answer key. **Engine workers** (`live/engine-worker.ts`, `--engine-workers N`): N engines, each owning 1/N of the dispatchers, metrics on :9464+i. **Main thread** (`live/server.ts`): the UI's HTTP + SSE API, the search parser and the load-decision agent; the engine too when N = 0 | the threads exchange messages (clock anchor, searches, stats, postings, alerts, load facts); the engine reaches the simulators over HTTP; outside the container: GLiNER2, Ollama, the collector, the browser; saved searches persist in the `live_state` volume |
+| `live` | one always-on process, 2 + N threads. **World thread** (`live/world-worker.ts`): `sim/world.ts` as a stream, boards-sim and the alert channel sim on 127.0.0.1:7001/7002, the rolling answer key. **Engine workers** (`live/engine-worker.ts`, `--engine-workers N`): N engines, each owning 1/N of the dispatchers, metrics on :9464+i. **Main thread** (`live/server.ts`): the UI's HTTP + SSE API, the search parser and the load-decision agent; the engine too when N = 0 | the threads exchange messages (clock anchor, searches, stats, postings, alerts, load facts); the engine reaches the simulators over HTTP; outside the container: GLiNER2, Ollama, the collector, the browser; saved searches persist in the `live_state` volume |
 
 Infrastructure in `docker compose` (DEPLOY.md): OpenTelemetry Collector, Tempo, Loki, Prometheus, Grafana (observability), GLiNER2 and Ollama (the search parser's models), self-hosted Langfuse, and the `live` service itself. All of it runs continuously on one Linux server; `app` is the only service that runs on demand.
 
@@ -116,7 +116,7 @@ Hot-path state is in memory. Each piece has exactly one owner, so there's no loc
 | Matcher index + specs | `Map<cell3|equip, Set<searchId>>` + `Map<searchId, SearchSpec>` | ~20K specs × 6–20 cells | rebuilt on search change | matcher, `cell3` | rebuilt from the searches file/store on start, and by `engine.refreshSearches()` whenever live mode's searches change |
 | Alerted keys `(user, load)` | `Set<string>` in hourly buckets | ~100K | 72 h | matcher, `cell3` (then the alert stage, `userId`) | snapshot (this matters most: it prevents repeat alerts after a restart) |
 | Alert queue | binary heap on `postedAt` (pop min or max, section 6.8) | small | deadline drop | notifier | lost on crash (accepted, section 8) |
-| Telegram buckets | token buckets per bot and per chat | ~users | idle 1 h | notifier, `chatId` | not needed |
+| Delivery buckets | token buckets per sender and per dispatcher | ~users | idle 1 h | notifier, `chatId` | not needed |
 
 **Memory note:** Node's garbage collector slows down with millions of small objects. Keep entries compact (short string keys, numbers not objects where possible), drop whole hourly buckets instead of deleting items one by one, and watch `heap_used_bytes` and GC pause time (section 10). Large heaps are one of the first things to break on a single machine (section 11).
 
@@ -125,7 +125,7 @@ Hot-path state is in memory. Each piece has exactly one owner, so there's no loc
 ```
 api ─▶ planner ─▶ scheduler ─▶ [poll queue] ─▶ pollers ─▶ [raw queue] ─▶ normalizer ─▶ [norm queue]
                                                                                             │
- telegram ◀─ notifier ◀─ [alert heap] ◀─ matcher ◀─ [new-load queue] ◀─ dedup ◀──────────────┘
+ web alerts ◀─ notifier ◀─ [alert heap] ◀─ matcher ◀─ [new-load queue] ◀─ dedup ◀──────────────┘
 ```
 
 - Every arrow is a **bounded** queue (ring buffer) with a length metric and a wait-time metric.
@@ -164,7 +164,7 @@ X-Credential: dat-9dbe45b5
 
 The simulator replays `postings.ndjson` on a clock (real time or N× speed). It removes a load once it is "covered" (lognormal ~20 min after first posting, shorter on hot lanes). It enforces a per-credential budget (default 60 requests/min, a made-up number) and bans after more than 20 rejected requests in 10 minutes. Each list response already contains every field the pipeline needs, so there is no per-load detail call (section 9).
 
-### 5.3 Telegram simulator (`telegram-sim`)
+### 5.3 Alert channel simulator (`sims/telegram-sim.ts`)
 
 `POST /bot{botId}/sendMessage {chat_id, text}` returns `200`, or `429 {"parameters":{"retry_after":s}}` beyond 30 messages/s per bot or 1/s per chat. Every accepted message is logged with its receive time for the scorer.
 
@@ -358,14 +358,14 @@ Implementation: two heaps on `postedAt` (min and max) over the same items, or on
 - Chats are spread over bots by `hash(chatId) % bots`.
 - Before each send, take a token from the bot bucket (30/s) and the chat bucket (1/s). If the chat bucket is empty, hold that chat's alerts for 2 s and merge them into one digest (up to 5 loads).
 - On `429`, wait `retry_after` and put the alert back. Delivery is at least once; the `(user, load)` set makes a repeat harmless.
-- HTTP concurrency to Telegram: ~10 sockets per bot (30 msg/s × ~0.2 s ≈ 6 in flight).
-- The `deliver` span records `postedAt → accepted by Telegram`. That is the headline latency.
+- HTTP concurrency to the alert channel: ~10 sockets per sender (30 msg/s × ~0.2 s ≈ 6 in flight).
+- The `deliver` span records `postedAt → accepted by the alert channel`. That is the headline latency.
 
 ### 6.10 Live mode (`live/`)
 
 Live mode runs the whole pipeline above continuously instead of as a one-shot batch job, plus a UI: one process, 2 + N threads. DESIGN.md §3.0 has the overall diagram; this section is the detail the other components above don't cover.
 
-**`live/world-worker.ts`** — the outside world on its own thread: the stream, boards-sim and telegram-sim (HTTP on 127.0.0.1:7001/7002, so the engine talks to them exactly as to real boards) and the answer key, which must see both loads being born and alerts being delivered. Messages in: `clock` (the new anchor after a speed change), `rate`, `burst`, `searches` (your searches changed: rebuild the answer key), `loadFacts` (the agent asks about one load). Messages out: `ready`, `stats` every second (world, boards, score, the thread's event-loop p99), `postings` every 250 ms, `alert` for your deliveries, `loadFacts` replies.
+**`live/world-worker.ts`** — the outside world on its own thread: the stream, boards-sim and the alert channel sim (HTTP on 127.0.0.1:7001/7002, so the engine talks to them exactly as to real boards) and the answer key, which must see both loads being born and alerts being delivered. Messages in: `clock` (the new anchor after a speed change), `rate`, `burst`, `searches` (your searches changed: rebuild the answer key), `loadFacts` (the agent asks about one load). Messages out: `ready`, `stats` every second (world, boards, score, the thread's event-loop p99), `postings` every 250 ms, `alert` for your deliveries, `loadFacts` replies.
 
 **`live/stream.ts`** — a world that never stops. It wraps `sim/world.ts`'s `createWorld(seed)` in a real-time loop: `tick()` samples a Poisson count of new loads for however much simulated time just passed (rate = `loadsPerDay × HOURLY[centralHour(now)] / HOURLY_SUM`, the same hourly curve the batch generator uses), creates them, and schedules every posting each one will ever get (`world.postingsFor`: first post, refreshes, reposts, cross-board copies, a co-broker) on a min-heap keyed by `posted_at`. Due postings are released into the same `BoardData` shape `boards-sim` serves from, indexed by `geohash(origin, 3)`, so `src/engine.ts` can't tell live mode's boards from the batch simulator's. `prune()` drops postings older than `KEEP_MS` (6 simulated hours) so memory doesn't grow forever. `burst(city, equip, count, windowMs)` adds many loads out of one market inside a short window — the UI's burst button.
 
@@ -412,7 +412,7 @@ Every path except `/api/events` and `/api/state` runs inside one OpenTelemetry t
 
 ## 9. Upstream: pools and N+1 (what bites first now)
 
-With no shared store, the remaining "network" is the boards and Telegram. That's where pool limits and N+1 live.
+With no shared store, the remaining "network" is the boards and the alert channel. That's where pool limits and N+1 live.
 
 **N+1 to board APIs.** Many real board APIs return a summary list, and a naive client then fetches each load's detail page. That's one extra request **per load**, spent from the customer's budget and adding latency:
 
@@ -427,7 +427,7 @@ With no shared store, the remaining "network" is the boards and Telegram. That's
 | Pool | Example load | Size needed | What happens if too small |
 | --- | --- | --- | --- |
 | Engine → each board | 2,000 req/s to DAT × 0.3 s = **600 in flight** | ~600 sockets (+30% headroom) | A fixed 64 caps throughput at ~210 req/s. Requests wait *inside the HTTP client*: board latency looks fine, our data gets staler, and nothing errors. The most likely silent limit in this system |
-| Engine → Telegram | 30 msg/s × 0.2 s ≈ 6 per bot | ~10 per bot | Same queuing failure, smaller |
+| Engine → alert channel | 30 msg/s × 0.2 s ≈ 6 per sender | ~10 per sender | Same queuing failure, smaller |
 | Engine → SQLite | cold path only | one connection | — |
 
 Each pool exposes its wait time (section 10). **A rising `http_pool_wait_seconds` with flat board latency means the pool is too small.**
@@ -475,7 +475,7 @@ llm_calls_total{result}, llm_latency_seconds, llm_tokens_total{kind}            
 One record per call: `{ts, model, prompt, output, input_tokens, output_tokens, latency_ms, cost_usd, valid, fields_changed_by_user}`. Stored as an OTel span (GenAI conventions) and as JSONL. `fields_changed_by_user` comes from the confirmation step and is the real-world accuracy signal.
 
 ### 10.4 Dashboard (one Grafana board)
-Row 1, customer view: post-to-alert p50/p95/p99, missed matches and duplicates (from the scorer), bans. Row 2, sources: requests by status per board, pool wait, paused logins, freshness. Row 3, engine: queue depth and wait per stage, event-loop lag, heap and GC, dedup results, fan-out. Row 4, delivery: alert queue depth and age, queue mode, stale drops, Telegram 429s.
+Row 1, customer view: post-to-alert p50/p95/p99, missed matches and duplicates (from the scorer), bans. Row 2, sources: requests by status per board, pool wait, paused logins, freshness. Row 3, engine: queue depth and wait per stage, event-loop lag, heap and GC, dedup results, fan-out. Row 4, delivery: alert queue depth and age, queue mode, stale drops, alert channel 429s.
 
 **Built, and smaller than the above:** `ops/grafana/dashboards/load-radar.json`, provisioned as code and set as the server's home dashboard — an SLO row (SLO.md), then throughput, latency, health, model calls, and a table of recent requests linked to their traces and logs. OBSERVABILITY.md §10 has the full panel list and the parts of this row-by-row plan that aren't built yet.
 
@@ -488,13 +488,13 @@ Work per unit, so measurements become capacity numbers:
 | One poll | an HTTPS request + parsing its JSON response | sockets (section 9), then CPU for TLS and JSON |
 | One posting | normalize + dedup stage 1, all in memory (tens of µs) | CPU: roughly tens of thousands per second per core |
 | One new canonical load | classifier on a few candidates + matcher candidates | CPU, spikes on hot cells |
-| One alert | a set check + a heap push, then Telegram | Telegram's 30 msg/s per bot |
+| One alert | a set check + a heap push, then the alert channel | 30 msg/s per sender |
 
 Likely order of failure on one machine, to confirm by measurement:
 1. **Board budgets** (outside our control): the customer-facing limit.
 2. **HTTP pool** if undersized: silent staleness (section 9).
 3. **One CPU core** (event-loop lag rises): parsing board responses. Fix: worker threads by `credentialId`.
-4. **Telegram delivery** on hot loads: digests, more bots, push.
+4. **Alert delivery** on hot loads: digests, more senders, a second channel.
 5. **Heap and GC** as in-memory state grows: compact entries, partition.
 6. **One machine's sockets, memory or CPU** in total: section 12.
 
@@ -517,7 +517,7 @@ Add something only when a measurement shows the need:
 | In-memory queues between stages | Kafka/Redpanda topics partitioned by the same keys |
 | Snapshot file | Snapshots + log replay per partition |
 | SQLite for searches and credentials | Postgres (cold path, small pool + PgBouncer); encrypted secrets in a KMS-backed vault |
-| Telegram only | In-app push as the main channel; Telegram and SMS as extras |
+| One web channel | Web (in-app) as the main channel; mobile push and SMS as extras |
 | Per-login polling only | Partner and push feeds (the shared lane) for as much volume as possible. The biggest lever |
 
 ## 14. Security
@@ -553,7 +553,7 @@ load-radar/
   docker-compose.yml          live mode, models (GLiNER2, Ollama), observability, Langfuse; app runs on demand
   ops/            server/deploy.sh, macos/*.plist (SSH tunnel), otel-collector.yaml, tempo.yaml, prometheus.yml, grafana/
   sim/            world.ts (the calibrated model), gen.ts (batch wrapper), validate.ts, data/, ASSUMPTIONS.md
-  sims/           boards-sim.ts, telegram-sim.ts, cover.ts
+  sims/           boards-sim.ts, telegram-sim.ts (alert channel), cover.ts
   src/
     shared/       types.ts, queue.ts (bounded), heap.ts, expiring.ts (hourly eviction), clock.ts, geo.ts
     normalize/    gazetteer.ts, normalize.ts
