@@ -30,7 +30,7 @@ requests/s = dispatchers × board logins each × requests per login per second
    × 1000 growth (5 million dispatchers)                                   ≈ 4.7 million/s
 ```
 
-Four engines behind nginx serve ~15,000 board requests/s within the SLOs on this 4-core machine — 15,000 dispatchers, ~3,800/s per engine (§3.5, SLO.md). 4.7 million/s would need roughly 1,200 engines that way. Moving volume to partner feeds (fetched once for everyone) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
+Four engines behind nginx serve ~15,000 board requests/s within the SLOs on this 4-core machine — 15,000 dispatchers (§3.5, SLO.md). A 16-core server running only engines should handle ~130,000–180,000/s (estimate), so 4.7 million/s is roughly 30 such servers. Moving volume to partner feeds (fetched once for everyone) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
 
 ## 2. Constraints that shape the design
 
@@ -187,6 +187,8 @@ Measured on the 4-core server (details: SLO.md):
 
 The ceiling of this machine is ~15,000 board requests/s within the SLO (~18,000 at the edge); past that all 8 hardware threads are busy. Per request: ~0.17 ms of engine CPU, ~0.11 ms of simulated-board CPU.
 
+On a bigger machine with real boards (estimate, SLO.md): all cores go to engines, ~6,000 board requests/s per core on this chip, 1.5–2× that on current server cores — a 16-core server ≈ 130,000–180,000 dispatchers. Network and the boards' per-login limits are the next things to check.
+
 ## 4. Decisions, alternatives and trade-offs
 
 The ~10–15 that matter most. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has a plain-language summary; the rest of the implementation choices are in LLD.md.
@@ -221,7 +223,7 @@ The ~10–15 that matter most. [GUIDE.md §6](GUIDE.md#6-technology-and-why) has
 | Stage | Example size | Runs as | Next limit | Response |
 | --- | --- | --- | --- | --- |
 | Today (measured, SLO.md) | 4 engines behind nginx: 15,000 dispatchers, ~15,000 board requests/s within the SLO (~18,000 at the edge with 5) | Engine cluster (containers), simulated boards in 4 threads | The 4-core machine is full (8 of 8 hardware threads) | Engines on separate machines, with handover when engines are added or removed |
-| 10x | ~50,000 customers | + more machines, each running its own engines behind the same hash | One CPU core (JSON parsing) | Threads, then processes |
+| 10x | ~50,000 customers | One 16-core server of engines (~130,000–180,000/s estimated), or a few smaller machines behind the same hash | Network bandwidth from board replies | Compressed replies, machines spread across the hash |
 | 100x | ~500,000 customers | Several machines, each owning partitions (login / cell / user) | Alert delivery; memory per machine | More senders, push as a second channel; compact state |
 | 1000x | ~5M customers | Many machines, partitions connected by Kafka; snapshots + log replay | Login budgets as a business limit | Shared and partner feeds wherever possible |
 

@@ -69,7 +69,7 @@ world (Part 4). It has never been connected to real boards.
 | Alert speed | 100% of alerts within 60 s; typical 2.7 s, p99 9.3 s (30 h live, ~290,000 alerts) |
 | Account safety | 0 bans, 0 rate-limit responses in 33 million board requests |
 | Duplicates | 0.03% of alerts |
-| Capacity | The engine cluster serves ~15,000 dispatchers within target on one 4-core server (4 engines) |
+| Capacity | The engine cluster serves ~15,000 dispatchers within target on one 4-core server (4 engines); a 16-core server of engines ≈ 130,000–180,000 (estimate) |
 | Dedup classifier | 99.85% precision, 99.4% recall |
 | Search parser | 98% of test searches fully right |
 | Load-decision agent | 88–100% right splitting the job, vs 21–42% letting a model decide everything |
@@ -239,6 +239,7 @@ this 4-core server are busy.
 | Step | Status | Rough capacity |
 | --- | --- | --- |
 | **Engine cluster** (engines behind nginx, one machine) | Built, measured | 4 engines: ~15,000 board requests/s, 15,000 dispatchers within the SLO |
+| Same cluster on a 16-core server, real boards | Estimate | ~130,000–180,000 dispatchers (~6,000 board requests/s per core on our chip, faster on current cores) |
 | Engines on several machines; handover and crash recovery | Not built | — |
 
 No step puts a database on the hot path. [LLD.md §12](LLD.md) lists the measured triggers for adding a shared

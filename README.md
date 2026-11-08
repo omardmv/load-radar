@@ -32,7 +32,8 @@ explained from zero.
   rate-limit responses in 33 million board requests; duplicates 0.03%. Completeness 96–97% (target 99%).
 - **Engine cluster** (engines behind nginx, hashed on dispatcher id): 4 engines serve **~15,000 board requests/s
   within the SLO** (15,000 dispatchers) on one 4-core server, ~18,000/s at the edge with 5. Hash routing: 0 duplicate
-  alerts, vs 48% with round robin. Run it with `scripts/cluster-steps.sh`.
+  alerts, vs 48% with round robin. Estimated: a 16-core server running only engines ≈ 130,000–180,000 dispatchers
+  (SLO.md). Run it with `scripts/cluster-steps.sh`.
 - **Dedup classifier:** 99.85% precision, 99.4% recall (27 wrong merges, 101 missed, on 61,122 held-out pairs).
   End to end: missed alerts 1.80%, duplicate alerts 0.00%.
 - **Search parser:** 98% of test searches fully right with rules + GLiNER2.

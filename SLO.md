@@ -67,8 +67,24 @@ CPU per container from `docker stats`, whole machine from `/proc/stat` (8 hardwa
 - **What keeps the cost per request low:** the engine's HTTP client uses undici's `request()` (not `fetch()`, which
   builds web objects and a timer per request); the simulated boards parse requests by hand, cache map cells, and run
   as 4 threads, each owning a share of the logins.
-- Beyond this box, each engine adds ~4,000–7,000 board requests/s of capacity on its own core (with real boards, the
-  board side isn't ours to run).
+
+#### On bigger machines (estimate, not measured)
+
+With real boards, the board side runs on the boards' servers, so every core of ours goes to engines. At ~0.17 ms of
+engine CPU per request, one engine core handles ~6,000 board requests/s on this chip (a 15 W laptop chip from 2019);
+a current server core is roughly 1.5–2× faster. One dispatcher costs about 1 board request/s.
+
+| Machine | Engine cores | Board requests/s ≈ dispatchers |
+| --- | --- | --- |
+| This server, fake boards on it too (measured) | ~2.5 | 15,000 within the SLO |
+| This server, engines only | ~4.5 | ~25,000 |
+| 16-core server | ~15 | ~90,000 at this chip's speed, ~130,000–180,000 on current cores |
+| 64-core server | ~60 | ~400,000–600,000 |
+
+Why it should hold: adding engines grew close to a straight line (6,050 → 12,096 → 15,096) and only bent when the
+whole machine ran out of CPU; engines don't talk to each other. What to check first on a big machine: network (at
+100,000 requests/s, a few KB per board reply is several Gbit/s), the boards' per-login limits (more hardware means
+more dispatchers, not faster polling per login), and nginx and alert delivery sized for that rate.
 
 Round robin instead of hash (3 engines, 6,000 dispatchers): 48% duplicate alerts, 54% of API calls reached an engine
 that doesn't own the dispatcher (404), 0.34% of board requests answered 429.
