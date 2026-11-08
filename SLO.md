@@ -58,7 +58,8 @@ CPU per container from `docker stats`, whole machine from `/proc/stat` (8 hardwa
 | 4, 18,000 | 18,055 | 85% ✗ (engines full) | 27 / 100 s | 3.32 | 2.06 | 6.29 |
 | 5, 21,000 | 16,976 | 45% ✗ (machine full) | 66 / 199 s | 4.40 | 2.37 | 7.89 |
 
-0 429s, 0 bans and 100% of loads alerted in every run.
+0 bans and 100% of loads alerted in every run. 429s: 63 in 43 million board requests across all runs (0.0001%), most of
+them in one spike while 4 engines were overloaded at 18,000 dispatchers.
 
 - **Within the SLO: ~15,000 board requests/s (15,000 dispatchers) with 4 engines; ~18,000/s at the edge with 5.**
   Past that the whole machine is busy (7.9 of 8 hardware threads) and throughput falls.
