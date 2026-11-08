@@ -25,12 +25,20 @@ A *broker* posts a *load* on a *load board* (DAT, Truckstop, broker portals); a 
 
 ```
 requests/s = dispatchers × board logins each × requests per login per second
-   measured:   2,000     ×       1.8        ×   ~0.52                       = 1,882/s   (SLO.md, 1×)
-   5,000 dispatchers                                                       ≈ 4,700/s
-   × 1000 growth (5 million dispatchers)                                   ≈ 4.7 million/s
+   measured:  15,000     ×       1.8        ×   ~0.56                       = 15,096/s   (SLO.md, engine cluster)
+   ≈ 1 board request/s per dispatcher
+   5,000 dispatchers                                                       ≈ 5,000/s
+   × 1000 growth (5 million dispatchers)                                   ≈ 5 million/s
 ```
 
-Four engines behind nginx serve ~15,000 board requests/s within the SLOs on this 4-core machine — 15,000 dispatchers (§3.5, SLO.md). A 16-core server running only engines should handle ~130,000–180,000/s (estimate), so 4.7 million/s is roughly 30 such servers. Moving volume to partner feeds (fetched once for everyone) — a business fix, not a server fix — is what actually bends that curve. At 2,000 dispatchers, board requests outnumber new loads about 1,600 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
+| | Board requests/s | Status |
+| --- | --- | --- |
+| 1 engine core (this chip) | ~6,000 (0.17 ms each); peak 7,150 | measured |
+| This 4-core server, 4 engines, fake boards on the same box | 15,096 within the SLO | measured |
+| One 16-core server running only engines | ~130,000–180,000 | estimate |
+| 5 million dispatchers | ~5 million → ~30–40 such servers | estimate |
+
+At 15,000 dispatchers and 100,000 new loads a day, board requests outnumber new loads about 13,000 to 1 — **the work is in polling and deduplicating, not in the freight itself.**
 
 ## 2. Constraints that shape the design
 
